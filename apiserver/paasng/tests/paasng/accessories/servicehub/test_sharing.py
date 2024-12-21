@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 from django_dynamic_fixture import G
 
+from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
 from paasng.accessories.servicehub.constants import Category
 from paasng.accessories.servicehub.exceptions import DuplicatedServiceBoundError, ReferencedAttachmentNotFound
 from paasng.accessories.servicehub.manager import SharedServiceInfo, mixed_service_mgr
@@ -59,17 +60,9 @@ def _setup_data(bk_app, bk_module):
 
 @pytest.fixture()
 def local_service(request):
-    if hasattr(request, "param"):
-        param = request.param
-    else:
-        param = request._parent_request.param
-
     service = G(Service, name="mysql", category=G(ServiceCategory), region=_region_name, logo_b64="dummy")
-    if param == "legacy-local":
-        G(Plan, name="no-ha", service=service)
-        G(Plan, name="ha", service=service)
-    else:
-        G(Plan, name=generate_random_string(), service=service)
+    G(Plan, name="plan-1", service=service)
+    G(Plan, name="plan-2", service=service)
     return mixed_service_mgr.get(service.uuid, region=_region_name)
 
 
@@ -86,14 +79,14 @@ def pick_different_category(service_obj: ServiceObj) -> int:
     raise RuntimeError("Can not found a wrong category")
 
 
-@pytest.fixture(params=["legacy-local", "newly-local", "remote"])
-def service_obj(request, local_service, remote_service):
+@pytest.fixture(params=["local", "remote"])
+def service_obj(request, local_service, remote_service, _setup_data):
     """
     Service object for testing, this fixture will yield both a remote and a local service
     """
     if request.param == "remote":
         return request.getfixturevalue("remote_service")
-    elif request.param in ["legacy-local", "newly-local"]:
+    elif request.param == "local":
         return request.getfixturevalue("local_service")
     else:
         raise ValueError("Invalid type_ parameter")
@@ -101,15 +94,15 @@ def service_obj(request, local_service, remote_service):
 
 @pytest.fixture()
 def ref_module(bk_app, bk_module, service_obj):
-    """A fixture which creates a module sharing service object to `bk_module`"""
-    ref_module = create_module(bk_app)
-    mixed_service_mgr.bind_service(service_obj, ref_module)
-
-    ServiceSharingManager(bk_module).create(service_obj, ref_module)
-    return ref_module
+    """A fixture which creates a module that referenced by sharing manager."""
+    return create_module(bk_app)
 
 
 class TestServiceSharingManager:
+    @pytest.fixture(autouse=True)
+    def _with_static_binding_policy(self, service_obj):
+        ServiceBindingPolicyManager(service_obj).set_static([service_obj.get_plans()[0]])
+
     def test_list_shareable(self, bk_app, bk_module, service_obj):
         # Bind source module with a remote service
         ref_module = create_module(bk_app)
@@ -153,11 +146,17 @@ class TestServiceSharingManager:
 
     def test_get_shared_info(self, bk_user, bk_app, bk_module, service_obj, ref_module):
         sharing_mgr = ServiceSharingManager(bk_module)
+        mixed_service_mgr.bind_service(service_obj, ref_module)
+        ServiceSharingManager(bk_module).create(service_obj, ref_module)
+
         info = sharing_mgr.get_shared_info(service_obj)
         assert isinstance(info, SharedServiceInfo)
 
     def test_list_shared_info(self, bk_user, bk_app, bk_module, service_obj, ref_module):
         sharing_mgr = ServiceSharingManager(bk_module)
+        mixed_service_mgr.bind_service(service_obj, ref_module)
+        ServiceSharingManager(bk_module).create(service_obj, ref_module)
+
         infos = sharing_mgr.list_shared_info(service_obj.category_id)
         assert len(infos) == 1
         assert infos[0].module == bk_module
@@ -170,11 +169,20 @@ class TestServiceSharingManager:
 
 
 class TestSharingReferencesManager:
+    @pytest.fixture(autouse=True)
+    def _setup_data(self, bk_module, ref_module, service_obj):
+        # Initialize the binding policy
+        ServiceBindingPolicyManager(service_obj).set_static([service_obj.get_plans()[0]])
+
+        # Create sharing relationship
+        mixed_service_mgr.bind_service(service_obj, ref_module)
+        ServiceSharingManager(bk_module).create(service_obj, ref_module)
+
     def test_list_related_modules(self, bk_user, bk_app, bk_module, service_obj, ref_module):
         modules = SharingReferencesManager(ref_module).list_related_modules(service_obj)
         assert modules == [bk_module]
 
-    def test_clear_related(self, bk_user, bk_app, bk_module, service_obj, ref_module):
+    def test_clear_related(self, bk_module, service_obj, ref_module):
         sharing_mgr = ServiceSharingManager(bk_module)
 
         assert len(sharing_mgr.list_shared_info(service_obj.category_id)) == 1
@@ -183,8 +191,13 @@ class TestSharingReferencesManager:
         assert len(sharing_mgr.list_shared_info(service_obj.category_id)) == 0
 
 
-@pytest.mark.parametrize("local_service", ["legacy-local", "newly-local"], indirect=["local_service"])
 class TestGetEnvVariables:
+    @pytest.fixture(autouse=True)
+    def _with_static_binding_policy(self, local_service):
+        """Initialize the service binding policy for local service."""
+        service = mixed_service_mgr.get(local_service.uuid, region=_region_name)
+        ServiceBindingPolicyManager(service).set_static([service.get_plans()[0]])
+
     def test_local_integrated(self, bk_app, bk_module, local_service):
         def _create_instance():
             """mocked function which creates a faked service instance"""

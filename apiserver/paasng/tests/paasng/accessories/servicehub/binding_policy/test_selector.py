@@ -22,7 +22,11 @@ from django_dynamic_fixture import G
 from paas_wl.infras.cluster.models import Cluster
 from paas_wl.infras.cluster.shim import EnvClusterService
 from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
-from paasng.accessories.servicehub.binding_policy.selector import PlanSelector, PossiblePlansResultType
+from paasng.accessories.servicehub.binding_policy.selector import (
+    PlanSelector,
+    PossiblePlansResultType,
+    get_plan_by_env,
+)
 from paasng.accessories.servicehub.constants import PrecedencePolicyCondType
 from paasng.accessories.servicehub.exceptions import MultiplePlanFoundError, NoPlanFoundError
 from paasng.accessories.servicehub.manager import mixed_plan_mgr, mixed_service_mgr
@@ -243,3 +247,44 @@ class TestPlanSelectorListPossiblePlans:
             "stag": [plan1],
             "prod": [plan1, plan2],
         }
+
+
+class Test__get_plan_by_env:
+    @pytest.fixture
+    def with_plans_env(self, service_obj, bk_module, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_env_specific(
+            env_plans=[
+                (AppEnvName.STAG, [plan1]),
+                (AppEnvName.PROD, [plan1, plan2]),
+            ]
+        )
+
+    @pytest.fixture
+    def with_plans_static(self, service_obj, bk_module, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_static([plan1])
+
+    def test_select_success(self, service_obj, bk_stag_env, plan1, with_plans_static):
+        selected_plan = get_plan_by_env(service_obj, bk_stag_env, None, None)
+        assert selected_plan == plan1
+
+    def test_select_fail(self, service_obj, bk_stag_env):
+        with pytest.raises(ValueError, match="no plans found"):
+            get_plan_by_env(service_obj, bk_stag_env, None, None)
+
+    def test_given_plan_id_static_ok(self, service_obj, bk_stag_env, plan1, with_plans_static):
+        selected_plan = get_plan_by_env(service_obj, bk_stag_env, plan1.uuid, None)
+        assert selected_plan == plan1
+
+    def test_given_plan_id_static_fail(self, service_obj, bk_stag_env, plan2, with_plans_static):
+        with pytest.raises(ValueError, match="no plan found by given plan_id"):
+            get_plan_by_env(service_obj, bk_stag_env, plan2.uuid, None)
+
+    def test_given_env_map_ok(self, service_obj, bk_stag_env, plan1, plan2, with_plans_env):
+        env_plan_id_map = {"stag": plan1.uuid}
+        selected_plan = get_plan_by_env(service_obj, bk_stag_env, None, env_plan_id_map)
+        assert selected_plan == plan1
+
+    def test_given_env_map_fail(self, service_obj, bk_stag_env, plan2, with_plans_env):
+        env_plan_id_map = {"stag": plan2.uuid}
+        with pytest.raises(ValueError, match="no plan found by given plan_id"):
+            get_plan_by_env(service_obj, bk_stag_env, None, env_plan_id_map)

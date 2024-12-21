@@ -29,7 +29,6 @@ from paas_wl.infras.cluster.utils import get_cluster_by_app
 from paasng.accessories.publish.entrance.exposer import get_exposed_links
 from paasng.accessories.publish.market.models import MarketConfig
 from paasng.accessories.servicehub.manager import ServiceObjNotFound, SvcAttachmentDoesNotExist, mixed_service_mgr
-from paasng.accessories.servicehub.services import ServiceObj, ServiceSpecificationHelper
 from paasng.infras.accounts.permissions.constants import SiteAction
 from paasng.infras.accounts.permissions.global_site import site_perm_required
 from paasng.infras.accounts.utils import ForceAllowAuthedApp
@@ -42,7 +41,6 @@ from paasng.plat_admin.system.applications import (
 )
 from paasng.plat_admin.system.serializers import (
     AddonCredentialsSLZ,
-    AddonSpecsSLZ,
     BasicMarketInfoSLZ,
     ClusterNamespaceSLZ,
     ContactInfoSLZ,
@@ -202,7 +200,7 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
         return Response(data=AddonCredentialsSLZ({"credentials": credentials}).data)
 
     # 下一个大版本移除该接口
-    @swagger_auto_schema(tags=["SYSTEMAPI"], request_body=AddonSpecsSLZ, deprecated=True)
+    @swagger_auto_schema(tags=["SYSTEMAPI"], deprecated=True)
     @site_perm_required(SiteAction.SYSAPI_READ_SERVICES)
     def provision_service(self, request, code, module_name, environment, service_name):
         """分配增强服务实例"""
@@ -219,11 +217,8 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
             mixed_service_mgr.get_module_rel(service_id=svc.uuid, module_id=module.id)
         except SvcAttachmentDoesNotExist:
             # 如果未启用增强服务, 则静默启用
-            serializer = AddonSpecsSLZ(data=request.data, context={"svc": svc})
-            serializer.is_valid(raise_exception=True)
-            specs = serializer.validated_data["specs"] or self._get_pub_recommended_specs(svc)
             try:
-                mixed_service_mgr.bind_service(svc, module, specs)
+                mixed_service_mgr.bind_service(svc, module)
             except Exception as e:
                 logger.exception("bind service %s to module %s error.", svc.uuid, module.name)
                 raise error_codes.CANNOT_BIND_SERVICE.f(str(e))
@@ -260,26 +255,8 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
         # 如果模块与增强服务之间没有绑定关系，直接返回 404 状态码
         if not mixed_service_mgr.module_is_bound_with(service, module):
             raise Http404
-
-        specs = {}
-        for env in module.envs.all():
-            for rel in mixed_service_mgr.list_all_rels(env.engine_app, service_id=service_id):
-                plan = rel.get_plan()
-                specs = plan.specifications
-                break  # 现阶段所有环境的服务规格一致，因此只需要拿一个
-
-        spec_data: Dict[str, Optional[str]] = {
-            definition.name: specs.get(definition.name) for definition in service.specifications
-        }
-        return Response({"results": spec_data})
-
-    @staticmethod
-    def _get_pub_recommended_specs(svc: ServiceObj) -> Optional[dict]:
-        """获取增强服务的推荐 specs"""
-        if not svc.public_specifications:
-            return None
-        # get_recommended_spec 可能会生成 value 是 None 的 spec
-        return ServiceSpecificationHelper.from_service_public_specifications(svc).get_recommended_spec()
+        # 待删除，目前不提供任何 specs 相关的内容
+        return Response({"results": {}})
 
 
 class LessCodeSystemAPIViewSet(viewsets.ViewSet):

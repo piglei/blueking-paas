@@ -32,7 +32,8 @@ from django.utils.translation import gettext_lazy as _
 from paas_wl.infras.cluster.shim import EnvClusterService
 from paas_wl.workloads.networking.egress.shim import get_cluster_egress_info
 from paasng.accessories.servicehub import constants, exceptions
-from paasng.accessories.servicehub.exceptions import BindServiceNoPlansError
+from paasng.accessories.servicehub.binding_policy.selector import get_plan_by_env
+from paasng.accessories.servicehub.exceptions import BindServicePlanError
 from paasng.accessories.servicehub.models import RemoteServiceEngineAppAttachment, RemoteServiceModuleAttachment
 from paasng.accessories.servicehub.remote.client import RemoteServiceClient
 from paasng.accessories.servicehub.remote.collector import RemoteSpecDefinitionUpdateSLZ, refresh_remote_service
@@ -47,14 +48,10 @@ from paasng.accessories.servicehub.services import (
     BasePlanMgr,
     BaseServiceMgr,
     EngineAppInstanceRel,
-    ModuleSpecificationsHelper,
     PlainInstanceMgr,
     PlanObj,
     ServiceInstanceObj,
     ServiceObj,
-    ServicePlansHelper,
-    ServiceSpecificationDefinition,
-    ServiceSpecificationHelper,
 )
 from paasng.accessories.services.models import ServiceCategory
 from paasng.core.region.models import get_all_regions
@@ -135,7 +132,6 @@ class RemoteServiceObj(ServiceObj):
         fields: Dict[str, Any] = {k: service.get(k) for k in field_names if k in service}
         fields["region"] = region
 
-        fields["specifications"] = [ServiceSpecificationDefinition(**i) for i in fields.get("specifications") or ()]
         fields["plans"] = [RemotePlanObj.from_data(i) for i in fields.get("plans") or ()]
 
         # Set up meta info
@@ -560,13 +556,16 @@ class RemoteServiceMgr(BaseServiceMgr):
                     continue
                 yield obj
 
-    def bind_service(self, service: ServiceObj, module: Module, specs: Optional[Dict[str, str]] = None) -> str:
+    def bind_service(
+        self,
+        service: ServiceObj,
+        module: Module,
+        plan_id: str | None = None,
+        env_plan_id_map: Dict[str, str] | None = None,
+    ) -> str:
         """Bind a service to module"""
-        helper = ModuleSpecificationsHelper(service=service, module=module, specs=specs or {})
-        helper.fill_protected_specs()
-
         binder = RemoteServiceBinder(service)
-        return binder.bind(module, helper.specs).pk
+        return binder.bind(module, plan_id, env_plan_id_map).pk
 
     def bind_service_partial(self, service: ServiceObj, module: Module) -> str:
         """Bind a service to module, without binding to engine app"""
@@ -731,27 +730,22 @@ class RemoteServiceBinder:
         self.service = service
 
     @atomic()
-    def bind(self, module: Module, specs: Optional[Dict[str, str]] = None):
+    def bind(self, module: Module, plan_id: str | None = None, env_plan_id_map: Dict[str, str] | None = None):
         """Create the binding relationship in local database.
 
         :raises BindServiceNoPlansError: When no appropriate plans can be found.
         """
-        specs_helper = ServiceSpecificationHelper(
-            self.service.specifications,
-            list(ServicePlansHelper.from_service(self.service).get_by_region(module.region)),
-        )
-        plans = specs_helper.filter_plans(specs)
-
         svc_module_attachment, _ = RemoteServiceModuleAttachment.objects.get_or_create(
             module=module,
             service_id=self.service.uuid,
         )
 
         # bind plans to each engineApp without creating
-        for env in module.envs.all():  # type: ModuleEnvironment
-            plan = self._get_plan_by_env(env.environment, plans)
-            if not plan:
-                raise BindServiceNoPlansError(env.environment)
+        for env in module.envs.all():
+            try:
+                plan = get_plan_by_env(self.service, env, plan_id, env_plan_id_map)
+            except ValueError as e:
+                raise BindServicePlanError(str(e))
 
             plan = cast(RemotePlanObj, plan)
             self._bind_for_env(env, plan)
@@ -764,20 +758,6 @@ class RemoteServiceBinder:
             service_id=self.service.uuid, module=module
         )
         return attachment
-
-    @staticmethod
-    def _get_plan_by_env(environment: str, plans: List[PlanObj]) -> Optional[PlanObj]:
-        """Return the first plan that matching the given env.
-
-        :param environment: The environment name.
-        :return: A plan object, None if no matching plan can be found.
-        """
-        plans = sorted(plans, key=lambda i: ("restricted_envs" in i.properties), reverse=True)
-
-        for plan in plans:
-            if "restricted_envs" not in plan.properties or environment in plan.properties["restricted_envs"]:
-                return plan
-        return None
 
     def _bind_for_env(self, env: ModuleEnvironment, plan: RemotePlanObj):
         attachment, created = RemoteServiceEngineAppAttachment.objects.get_or_create(

@@ -15,8 +15,8 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Local services manager
-"""
+"""Local services manager"""
+
 import json
 import logging
 import uuid
@@ -31,8 +31,9 @@ from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext_lazy as _
 
 from paasng.accessories.servicehub import constants
+from paasng.accessories.servicehub.binding_policy.selector import get_plan_by_env
 from paasng.accessories.servicehub.exceptions import (
-    BindServiceNoPlansError,
+    BindServicePlanError,
     CanNotModifyPlan,
     ProvisionInstanceError,
     ServiceObjNotFound,
@@ -48,8 +49,6 @@ from paasng.accessories.servicehub.services import (
     PlanObj,
     ServiceInstanceObj,
     ServiceObj,
-    ServiceSpecificationDefinition,
-    ServiceSpecificationHelper,
 )
 from paasng.accessories.services.models import Plan, Service
 from paasng.misc.metrics import SERVICE_PROVISION_COUNTER
@@ -111,9 +110,6 @@ class LocalServiceObj(ServiceObj):
         # format uuid instance to str
         if isinstance(fields["uuid"], UUID):
             fields["uuid"] = str(fields["uuid"])
-        fields["specifications"] = [
-            ServiceSpecificationDefinition(**i) for i in service.config.get("specifications") or ()
-        ]
         fields["provider_name"] = service.config.get("provider_name", None)
 
         result = cls(**fields)
@@ -278,10 +274,16 @@ class LocalServiceMgr(BaseServiceMgr):
         db_obj = Service.objects.get(pk=service.uuid)
         db_obj.delete()
 
-    def bind_service(self, service: ServiceObj, module: Module, specs: Optional["Dict[str, str]"] = None) -> str:
+    def bind_service(
+        self,
+        service: ServiceObj,
+        module: Module,
+        plan_id: str | None = None,
+        env_plan_id_map: Dict[str, str] | None = None,
+    ) -> str:
         """Bind a service to module"""
         db_service = Service.objects.get(pk=service.uuid)
-        return LocalServiceBinder(LocalServiceObj.from_db_object(db_service)).bind(module).pk
+        return LocalServiceBinder(LocalServiceObj.from_db_object(db_service)).bind(module, plan_id, env_plan_id_map).pk
 
     def bind_service_partial(self, service: ServiceObj, module: Module) -> str:
         """Bind a service to module, without binding to engine app"""
@@ -481,30 +483,24 @@ class LocalServiceBinder:
         self.service = service
 
     @atomic()
-    def bind(self, module: Module, specs: Optional[Dict[str, str]] = None):
+    def bind(self, module: Module, plan_id: str | None, env_plan_id_map: dict[str, str] | None):
         """Create the binding relationship in local database.
 
         :raises BindServiceNoPlansError: When no appropriate plans can be found.
         """
-        specs_helper = ServiceSpecificationHelper(
-            definitions=self.service.specifications, plans=self.service.get_plans(is_active=True)
-        )
-        # if provided empty specifications, will return all plans.
-        plans = specs_helper.filter_plans(specifications=specs)
-
         svc_module_attachment, _ = ServiceModuleAttachment.objects.get_or_create(
             service=self.service.db_object, module=module
         )
 
-        # bind plans to each engineApp without provision
-        for env in module.envs.all():  # type: ModuleEnvironment
-            plan = self._get_plan_by_env(env.environment, plans)
-            if not plan:
-                raise BindServiceNoPlansError(env.environment)
+        # bind plans to each environment
+        for env in module.envs.all():
+            try:
+                plan = get_plan_by_env(self.service, env, plan_id, env_plan_id_map)
+            except ValueError as e:
+                raise BindServicePlanError(str(e))
 
             plan = cast(LocalPlanObj, plan)
             self._bind_for_env(env, plan)
-
         return svc_module_attachment
 
     @atomic()
@@ -514,20 +510,6 @@ class LocalServiceBinder:
             service=self.service.db_object, module=module
         )
         return svc_module_attachment
-
-    @staticmethod
-    def _get_plan_by_env(environment: str, plans: List[PlanObj]) -> Optional[PlanObj]:
-        """Return the first plan that matching the given env.
-
-        :param environment: The environment name.
-        :return: A plan object, None if no matching plan can be found.
-        """
-        plans = sorted(plans, key=lambda i: ("restricted_envs" in i.properties), reverse=True)
-
-        for plan in plans:
-            if "restricted_envs" not in plan.properties or environment in plan.properties["restricted_envs"]:
-                return plan
-        return None
 
     def _bind_for_env(self, env: ModuleEnvironment, plan: LocalPlanObj):
         svc_engine_app_attachment, created = ServiceEngineAppAttachment.objects.get_or_create(

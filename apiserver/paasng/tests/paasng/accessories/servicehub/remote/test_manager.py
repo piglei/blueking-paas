@@ -22,17 +22,19 @@ from typing import Dict
 from unittest import mock
 
 import pytest
-from django.test.utils import override_settings
 from django_dynamic_fixture import G
 
-from paas_wl.infras.cluster.models import Cluster
-from paasng.accessories.servicehub.exceptions import BindServiceNoPlansError, CanNotModifyPlan, ServiceObjNotFound
+from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
+from paasng.accessories.servicehub.exceptions import (
+    BindServicePlanError,
+    CanNotModifyPlan,
+    ServiceObjNotFound,
+)
 from paasng.accessories.servicehub.manager import mixed_service_mgr
 from paasng.accessories.servicehub.models import RemoteServiceEngineAppAttachment
 from paasng.accessories.servicehub.remote import RemoteServiceMgr, collector
 from paasng.accessories.servicehub.remote.manager import MetaInfo, RemoteEngineAppInstanceRel, RemotePlanObj
 from paasng.accessories.servicehub.remote.store import get_remote_store
-from paasng.platform.modules.models import Module
 from tests.paasng.accessories.servicehub import data_mocks
 from tests.utils.api import mock_json_response
 
@@ -109,30 +111,22 @@ class TestRemoteEngineAppInstanceRel:
 
     @mock.patch("paas_wl.workloads.networking.egress.shim.get_cluster_egress_info")
     @mock.patch("paasng.accessories.servicehub.remote.client.RemoteServiceClient.provision_instance")
-    @pytest.mark.parametrize(
-        "plans",
-        [
-            ([gen_plan("r1", {"app_zone": "universal"}, {})]),
-            (
-                [
-                    gen_plan("r1", {"app_zone": "universal"}, {"restricted_envs": ["stag"]}),
-                    gen_plan("r1", {"app_zone": "universal"}, {"restricted_envs": ["prod"]}),
-                ]
-            ),
-        ],
-    )
-    def test_provision(self, mocked_provision, get_cluster_egress_info, store, bk_module, bk_service_ver, plans):
+    def test_provision(self, mocked_provision, get_cluster_egress_info, store, bk_module, bk_service_ver):
         """Test service instance provision"""
         get_cluster_egress_info.return_value = {"egress_ips": ["1.1.1.1"], "digest_version": "foo"}
+        plans = [gen_plan("r1", {}, {})]
         mgr = RemoteServiceMgr(store=store)
         bk_service_ver.plans = plans
 
+        # Set the binding policy and bind
+        ServiceBindingPolicyManager(bk_service_ver).set_static([plans[0]])
         mgr.bind_service(bk_service_ver, bk_module)
+
         with mock.patch.object(mgr, "get") as get_service:
             get_service.return_value = bk_service_ver
 
             for env in bk_module.envs.all():
-                expected_plan = plans[1] if env.environment == "prod" and len(plans) == 2 else plans[0]
+                expected_plan = plans[0]
                 for rel in mgr.list_unprovisioned_rels(env.engine_app):
                     assert rel.is_provisioned() is False
                     rel.provision()
@@ -151,6 +145,9 @@ class TestRemoteEngineAppInstanceRel:
         mock_get_egress_info.return_value = {}
         mgr = RemoteServiceMgr(store=store)
         bk_service_ver.plans = [gen_plan("r1", {}, {})]
+
+        # Set the binding policy and bind
+        ServiceBindingPolicyManager(bk_service_ver).set_static([bk_service_ver.plans[0]])
         mgr.bind_service(bk_service_ver, bk_module)
 
         env = bk_module.get_envs("stag")
@@ -221,179 +218,49 @@ class TestRemoteMgrWithRealStore:
             with pytest.raises(ServiceObjNotFound):
                 mgr.find_by_name(name=name, region=bk_module.region)
 
-    @pytest.mark.parametrize(
-        ("specs", "ok"),
-        [
-            ({}, True),
-            ({"version": "sth-wrong"}, False),
-            ({"version": "1"}, True),
-        ],
-    )
-    def test_bind_with_specs(self, store, bk_module, bk_service_ver, specs, ok):
-        mgr = RemoteServiceMgr(store=store)
-        assert mgr.module_is_bound_with(bk_service_ver, bk_module) is False
-        if ok:
-            mgr.bind_service(bk_service_ver, bk_module, specs=specs.copy())
-        else:
-            with pytest.raises(BindServiceNoPlansError):
-                mgr.bind_service(bk_service_ver, bk_module, specs=specs.copy())
-        assert mgr.module_is_bound_with(bk_service_ver, bk_module) is ok
-
-        if ok and specs:
-            for env in bk_module.envs.all():
-                for rel in mixed_service_mgr.list_unprovisioned_rels(env.engine_app, bk_service_ver):
-                    plan = rel.get_plan()
-                    assert len(plan.specifications) > 0
-                    for k, v in specs.items():
-                        assert plan.specifications[k] == v
-
     @mock.patch("paasng.accessories.servicehub.remote.client.RemoteServiceClient.provision_instance")
     def test_module_rebind_failed_after_provision(self, mock_provision_instance, store, bk_module, bk_service_ver):
         mgr = RemoteServiceMgr(store=store)
 
-        mgr.bind_service(bk_service_ver, bk_module, {"version": "1"})
+        plans = bk_service_ver.plans
+        ServiceBindingPolicyManager(bk_service_ver).set_static([plans[0]])
+        mgr.bind_service(bk_service_ver, bk_module)
         env = bk_module.get_envs("stag")
 
         for rel in mgr.list_unprovisioned_rels(env.engine_app, bk_service_ver):
             rel.provision()
             assert rel.is_provisioned() is True
 
+        # Change the binding policy
+        ServiceBindingPolicyManager(bk_service_ver).set_static([plans[1]])
         with pytest.raises(CanNotModifyPlan):
-            mgr.bind_service(bk_service_ver, bk_module, {"version": "2"})
+            mgr.bind_service(bk_service_ver, bk_module)
 
         for rel in mgr.list_unprovisioned_rels(env.engine_app, bk_service_ver):
             plan = rel.get_plan()
-            assert plan.specifications["version"] == "1"
+            assert plan.name == plans[0].name
 
 
 class TestRemoteMgrWithMockedStore:
     @pytest.fixture(autouse=True)
-    def _reset_region(self, config, store, bk_app, bk_module):
+    def _setup_data(self, config, store, bk_app, bk_module, bk_service_ver):
         bk_app.region = "r1"
         bk_module.region = "r1"
         bk_app.save()
         bk_module.save()
 
-    @pytest.mark.parametrize(
-        "plans",
-        [
-            ([gen_plan("r1", {}, {})]),
-            ([gen_plan("r1", {}, {}), gen_plan("r1", {}, {}), gen_plan("r3", {}, {})]),
-        ],
-    )
-    def test_bind_service(self, store, bk_module, bk_service_ver, plans):
-        mgr = RemoteServiceMgr(store=store)
+        plans = [gen_plan("r1", {}, {})]
         bk_service_ver.plans = plans
+
+    def test_bind_service(self, store, bk_module, bk_service_ver):
+        mgr = RemoteServiceMgr(store=store)
+        ServiceBindingPolicyManager(bk_service_ver).set_static([bk_service_ver.plans[0]])
         mgr.bind_service(bk_service_ver, bk_module)
 
-    @pytest.mark.parametrize(
-        "plans",
-        [
-            ([gen_plan("r2", {}, {})]),
-            ([gen_plan("r2", {}, {}), gen_plan("r3", {}, {}), gen_plan("r4", {}, {})]),
-            ([gen_plan("r1", {}, {"restricted_envs": ["stag"]})]),
-            ([gen_plan("r1", {}, {"restricted_envs": ["prod"]})]),
-        ],
-    )
-    def test_bind_service_errors(self, store, bk_module, bk_service_ver, plans):
+    def test_bind_service_no_plans(self, store, bk_module, bk_service_ver):
         mgr = RemoteServiceMgr(store=store)
-        bk_service_ver.plans = plans
-        with pytest.raises(BindServiceNoPlansError):
+        with pytest.raises(BindServicePlanError):
             mgr.bind_service(bk_service_ver, bk_module)
-
-    @pytest.mark.parametrize(
-        ("stag_plan", "prod_plan"),
-        [
-            (
-                gen_plan(
-                    "r1",
-                    {},
-                    {"restricted_envs": ["stag"]},
-                ),
-                gen_plan("r1", {}, {"restricted_envs": ["prod"]}),
-            )
-        ],
-    )
-    def test_bind_service_mixed_plans(self, store, bk_module, bk_service_ver, stag_plan, prod_plan):
-        """测试不同环境绑定不一样的 plan, 依赖 restricted_envs 字段"""
-        mgr = RemoteServiceMgr(store=store)
-        bk_service_ver.plans = [stag_plan, prod_plan]
-        mgr.bind_service(bk_service_ver, bk_module)
-
-        with mock.patch.object(store, "get") as get_svc:
-            get_svc.return_value = asdict(bk_service_ver)
-
-            # Check bound plan
-            for env, plan in [("stag", stag_plan), ("prod", prod_plan)]:
-                rels = mgr.list_unprovisioned_rels(bk_module.envs.get(environment=env).engine_app, bk_service_ver)
-                rel = list(rels)[0]
-                bound_plan = rel.get_plan()
-                assert bound_plan.name == plan.name
-                assert bound_plan == plan
-
-    @mock.patch("paasng.accessories.servicehub.services.get_application_cluster")
-    @pytest.mark.parametrize(
-        ("cluster_name", "zone_name", "plans", "expected_zone_name", "ok"),
-        [
-            (None, None, [gen_plan("r1", dict(app_zone="universal"), {})], "universal", True),
-            ("A", "universal", [gen_plan("r1", dict(app_zone="universal"), {})], "universal", True),
-            ("A", "ZA", [gen_plan("r1", dict(app_zone="ZA"), {})], "ZA", True),
-            (
-                "A",
-                "ZA",
-                [gen_plan("r1", dict(app_zone="ZB"), {}), gen_plan("r1", dict(app_zone="ZA"), {})],
-                "ZA",
-                True,
-            ),
-            (None, None, [gen_plan("r1", dict(app_zone="sth-wrong"), {})], "universal", False),
-            ("A", "universal", [gen_plan("r1", dict(app_zone="ZA"), {})], "ZA", False),
-            ("A", "ZA", [gen_plan("r1", dict(app_zone="universal"), {})], "universal", False),
-            (
-                "A",
-                "ZA",
-                [gen_plan("r1", dict(app_zone="ZB"), {})],
-                "ZB",
-                False,
-            ),
-        ],
-    )
-    def test_bound_with_diff_app_zone(
-        self,
-        g_cluster,
-        store,
-        bk_module,
-        bk_service_ver_zone,
-        cluster_name,
-        zone_name,
-        plans,
-        expected_zone_name,
-        ok,
-    ):
-        """测试不同环境绑定不一样的 plan, 依赖 specifications[app_zone]"""
-        g_cluster.return_value = Cluster(name=cluster_name, is_default=True)
-        mgr = RemoteServiceMgr(store=store)
-        bk_service_ver_zone.plans = plans
-
-        assert mgr.module_is_bound_with(bk_service_ver_zone, bk_module) is False
-
-        with override_settings(APP_ZONE_CLUSTER_MAPPINGS={cluster_name: zone_name} if zone_name else {}):
-            if ok:
-                mgr.bind_service(bk_service_ver_zone, bk_module, {})
-            else:
-                with pytest.raises(BindServiceNoPlansError):
-                    mgr.bind_service(bk_service_ver_zone, bk_module, {})
-
-        assert mgr.module_is_bound_with(bk_service_ver_zone, bk_module) is ok
-
-        if ok:
-            with mock.patch.object(store, "get") as get_svc:
-                get_svc.return_value = asdict(bk_service_ver_zone)
-
-                for env in bk_module.envs.all():
-                    for rel in mgr.list_unprovisioned_rels(env.engine_app, bk_service_ver_zone):
-                        plan = rel.get_plan()
-                        assert len(plan.specifications) > 0
-                        assert plan.specifications["app_zone"] == expected_zone_name
 
 
 id_of_first_service: str = data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"]
@@ -403,12 +270,17 @@ class TestRemoteMgr:
     app_region = "r1"
 
     @pytest.fixture(autouse=True)
-    def _setup_data(self, _faked_remote_services, bk_app, bk_module):
+    def _setup_data(self, _faked_remote_services, store, bk_app, bk_module):
         # Update app and module fixture's region
         bk_app.region = self.app_region
         bk_app.save(update_fields=["region"])
         bk_module.region = self.app_region
         bk_module.save(update_fields=["region"])
+
+        # Initialize with a static binding policy
+        mgr = RemoteServiceMgr(store=store)
+        svc = mgr.get(id_of_first_service, region=bk_module.region)
+        ServiceBindingPolicyManager(svc).set_static([svc.get_plans()[0]])
 
     @pytest.fixture()
     def store(self):
@@ -515,22 +387,6 @@ class TestRemoteMgr:
 
                 assert mixed_service_mgr.get_env_vars(env.engine_app, filter_enabled=True) == {}
 
-    # TODO: 重构单元测试
-    # def test_module_rebind_with_specs(self):
-    #     mgr = RemoteServiceMgr(store=self.store)
-    #     svc = mgr.get(id_of_first_service, region=self.module.region)
-    #
-    #     versions = ["1", "2"]
-    #     for v in versions:
-    #         mgr.bind_service(svc, self.module, {"version": v, "engine": "x1"})
-    #         assert mgr.module_is_bound_with(svc, self.module) is True
-    #
-    #         for env in self.module.envs.all():
-    #             for rel in mixed_service_mgr.list_unprovisioned_rels(env.engine_app, svc):
-    #                 plan = rel.get_plan()
-    #                 assert plan.specifications["version"] == v
-    #                 assert plan.specifications["engine"] == "x1"
-
     def test_get_attachment_by_instance_id(self, store, bk_module):
         expect_obj: Dict[uuid.UUID, RemoteServiceEngineAppAttachment] = {}
 
@@ -550,8 +406,8 @@ class TestRemoteMgr:
                         rel.provision()
                         expect_obj[rel.db_obj.service_instance_id] = rel.db_obj
 
-        for service_instance_id in expect_obj:
-            assert mgr.get_attachment_by_instance_id(svc, service_instance_id) == expect_obj[service_instance_id]
+        for _id, expected_val in expect_obj.items():
+            assert mgr.get_attachment_by_instance_id(svc, _id) == expected_val
 
 
 class TestLegacyRemoteMgr:
@@ -559,12 +415,17 @@ class TestLegacyRemoteMgr:
     uuid = data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[2]["uuid"]
 
     @pytest.fixture(autouse=True)
-    def _setup_data(self, _faked_remote_services, bk_app, bk_module):
+    def _setup_data(self, _faked_remote_services, store, bk_app, bk_module):
         # Update app and module fixture's region
         bk_app.region = self.app_region
         bk_app.save(update_fields=["region"])
         bk_module.region = self.app_region
         bk_module.save(update_fields=["region"])
+
+        # Initialize with a static binding policy
+        mgr = RemoteServiceMgr(store=store)
+        svc = mgr.get(self.uuid, region=bk_module.region)
+        ServiceBindingPolicyManager(svc).set_static([svc.get_plans()[0]])
 
     @pytest.fixture()
     def store(self):
@@ -575,16 +436,6 @@ class TestLegacyRemoteMgr:
         svc = mgr.get(self.uuid, region=bk_module.region)
         mgr.bind_service(svc, bk_module)
         assert mgr.module_is_bound_with(svc, bk_module) is True
-
-    def test_bind_service_wrong_region(self, store, bk_module):
-        mgr = RemoteServiceMgr(store=store)
-        svc = mgr.get(self.uuid, region=bk_module.region)
-
-        # Re-query another module object to avoid conflict
-        module = Module.objects.get(pk=bk_module.pk)
-        module.region = "r-invalid"
-        with pytest.raises(BindServiceNoPlansError):
-            mgr.bind_service(svc, module)
 
     def test_list_binded(self, store, bk_app, bk_module):
         mgr = RemoteServiceMgr(store=store)

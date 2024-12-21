@@ -17,6 +17,8 @@
 
 import uuid
 
+from django.conf import settings
+
 from paasng.accessories.servicehub.remote.manager import RemotePlanObj, RemoteServiceObj
 from tests.utils.helpers import generate_random_string
 
@@ -50,4 +52,19 @@ def gen_plan(region: str, specifications: dict, properties: dict):
         region=region,
         specifications=specifications,
         properties=properties,
+    )
+
+
+def create_random_plan():
+    """Create a random remote plan object"""
+    name = generate_random_string()
+    return RemotePlanObj(
+        uuid=str(uuid.uuid4()),
+        name=name,
+        description=generate_random_string(),
+        is_active=True,
+        is_eager=False,
+        region=settings.DEFAULT_REGION,
+        specifications={},
+        properties={},
     )

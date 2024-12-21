@@ -168,10 +168,18 @@ class MixedServiceMgr:
         # 所有 mgr 都无法找到具体条目
         raise SvcAttachmentDoesNotExist(f"module<{module_id}> has no attachment with service<{service_id}>")
 
-    def bind_service(self, service: ServiceObj, module: Module, specs: Optional[Dict[str, str]] = None) -> str:
+    def bind_service(
+        self,
+        service: ServiceObj,
+        module: Module,
+        plan_id: str | None = None,
+        env_plan_id_map: Dict[str, str] | None = None,
+    ) -> str:
         """Create bind relationship for given module and service object"""
         DuplicatedBindingValidator(module, ServiceBindingType.NORMAL).validate(service)
-        return _proxied_svc_dispatcher("bind_service")(self, service, module, specs=specs)
+        return _proxied_svc_dispatcher("bind_service")(
+            self, service, module, plan_id=plan_id, env_plan_id_map=env_plan_id_map
+        )
 
     # Dispatch via service type start
 

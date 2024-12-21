@@ -46,7 +46,7 @@ from paasng.accessories.servicehub.remote.manager import (
     get_app_by_instance_name,
 )
 from paasng.accessories.servicehub.remote.store import get_remote_store
-from paasng.accessories.servicehub.services import ServiceObj, ServicePlansHelper, ServiceSpecificationHelper
+from paasng.accessories.servicehub.services import ServiceObj
 from paasng.accessories.servicehub.sharing import ServiceSharingManager, SharingReferencesManager
 from paasng.accessories.services.models import ServiceCategory
 from paasng.core.region.models import get_all_regions
@@ -124,17 +124,16 @@ class ModuleServicesViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
         serializer.is_valid(raise_exception=True)
 
         data = serializer.data
-        specs = data["specs"]
+        # TODO: 增强服务绑定逻辑已经优化，删除原本接收的 specs 参数，转而接收可能得 plan_id
+        # 或 env_plan_id_map 参数
         application = self._get_application_by_code(data["code"])
         service_obj = self.get_service(data["service_id"], application)
         module = application.get_module(data.get("module_name", None))
 
         try:
-            rel_pk = mixed_service_mgr.bind_service(service_obj, module, specs)
+            rel_pk = mixed_service_mgr.bind_service(service_obj, module)
         except BindServiceNoPlansError as e:
-            logger.warning(
-                "No plans can be found for service %s, specs: %s, environment: %s.", service_obj.uuid, specs, str(e)
-            )
+            logger.warning("No plans can be found for service %s, environment: %s.", service_obj.uuid, str(e))
             raise error_codes.CANNOT_BIND_SERVICE.f(_("当前配置规格不可用"))
         except Exception:
             logger.exception("bind service %s to module %s error.", service_obj.uuid, module.name)
@@ -334,14 +333,15 @@ class ServiceViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
         """根据初始模板获取相关增强服务"""
         tmpl = Template.objects.get(name=template, type=TemplateType.NORMAL)
         services = {}
-        for name, info in tmpl.preset_services_config.items():
+        for name in tmpl.preset_services_config:
+            # INFO: 之前的版本会读取 preset_services_config 中的 value 作为服务信息，用来
+            # 当成 Specs 来筛选服务的 Plan，目前已废弃。
             try:
                 service = mixed_service_mgr.find_by_name(name, region)
             except ServiceObjNotFound:
                 logger.exception("Failed to get enhanced service <%s> preset in template <%s>", name, template)
                 continue
 
-            helper = ServiceSpecificationHelper.from_service_public_specifications(service)
             slz = slzs.ServiceWithSpecsSLZ(
                 {
                     "uuid": service.uuid,
@@ -349,7 +349,6 @@ class ServiceViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
                     "display_name": service.display_name,
                     "description": service.description,
                     "category": service.category,
-                    "specs": helper.format_given_specs(info.get("specs", {})),
                 }
             )
             services[service.name] = slz.data
@@ -612,21 +611,10 @@ class ServicePlanViewSet(viewsets.ViewSet):
 
     @swagger_auto_schema(Response={200: slzs.ServiceSpecificationSLZ}, tags=["增强服务"])
     def retrieve_specifications(self, request, service_id, region):
-        """获取一个增强服务的规格组合"""
-
-        service = mixed_service_mgr.get_or_404(service_id, region=region)
-        plan_helper = ServicePlansHelper.from_service(service)
-        definitions = service.public_specifications
-        helper = ServiceSpecificationHelper(definitions, list(plan_helper.get_by_region(region)))
-        slz = slzs.ServiceSpecificationSLZ(
-            dict(
-                definitions=definitions,
-                recommended_values=helper.get_recommended_spec().values(),
-                values=helper.list_plans_spec_value(),
-            )
-        )
-
-        return Response(slz.data)
+        """[本接口已废弃] 获取一个增强服务的规格组合"""
+        # 本接口已废弃，服务绑定不再使用 specs
+        # TODO：删除此接口
+        return Response({})
 
 
 class ServiceSharingViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):

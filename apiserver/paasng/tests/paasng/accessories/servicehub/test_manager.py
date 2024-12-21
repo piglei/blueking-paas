@@ -24,8 +24,9 @@ from uuid import UUID
 import pytest
 from django_dynamic_fixture import G
 
+from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
 from paasng.accessories.servicehub.constants import Category
-from paasng.accessories.servicehub.exceptions import BindServiceNoPlansError, ServiceObjNotFound
+from paasng.accessories.servicehub.exceptions import ServiceObjNotFound
 from paasng.accessories.servicehub.local import LocalServiceMgr, LocalServiceObj
 from paasng.accessories.servicehub.manager import mixed_service_mgr
 from paasng.accessories.servicehub.models import ServiceEngineAppAttachment
@@ -119,33 +120,41 @@ class TestMixedMgr:
 
 
 class TestLocalMgr:
-    @pytest.fixture(autouse=True)
+    @pytest.fixture()
     def svc(self, bk_app):
         """Create a local service object."""
         category = G(ServiceCategory, id=Category.DATA_STORAGE)
         svc = G(Service, name="mysql", category=category, region=bk_app.region, logo_b64="dummy")
         # Create 2 plans
-        G(Plan, name="no-ha", service=svc, config="{}")
-        G(Plan, name="ha", service=svc, config="{}")
+        G(Plan, name="plan-stag", service=svc, config="{}")
+        G(Plan, name="plan-prod", service=svc, config="{}")
         return svc
 
     @pytest.fixture()
-    def plan_default(self, svc):
-        return Plan.objects.get(service=svc, name="no-ha")
+    def service(self, svc, bk_module) -> LocalServiceObj:
+        return LocalServiceMgr().get(svc.uuid, region=bk_module.region)
 
     @pytest.fixture()
-    def plan_ha(self, svc):
-        return Plan.objects.get(service=svc, name="ha")
+    def plan_stag(self, service):
+        plans = service.get_plans()
+        return next((p for p in plans if p.name == "plan-stag"), None)
+
+    @pytest.fixture(autouse=True)
+    def _with_static_binding_policy(self, service, plan_stag):
+        """Set the binding policy for the service to a static plan, so the binding can
+        proceed by default.
+        """
+        ServiceBindingPolicyManager(service).set_static([plan_stag])
 
     @pytest.fixture()
-    def instance_factory(self, svc, plan_default):
+    def instance_factory(self, svc, plan_stag):
         """A factory method that creates an instance object."""
 
         def _create():
             return G(
                 ServiceInstance,
                 service=svc,
-                plan=plan_default,
+                plan=plan_stag.db_object,
                 config="{}",
                 credentials=dumps({"MYSQL_USERNAME": "foo", "MYSQL_PASSWORD": "bar"}),
             )
@@ -252,36 +261,5 @@ class TestLocalMgr:
                     rel.provision()
                     expect_obj[rel.db_obj.service_instance_id] = rel.db_obj
 
-        for service_instance_id in expect_obj:
-            assert mgr.get_attachment_by_instance_id(svc, service_instance_id) == expect_obj[service_instance_id]
-
-
-class TestLocalRabbitMQMgr:
-    @pytest.fixture(autouse=True)
-    def svc(self, bk_app):
-        """Create a local service object."""
-        category = G(ServiceCategory, id=Category.DATA_STORAGE)
-        svc = G(Service, name="rabbitmq", category=category, region=bk_app.region, logo_b64="dummy")
-        # Create 2 inactive plans
-        G(Plan, name="no-ha", service=svc, config="{}", is_active=False)
-        G(Plan, name="ha", service=svc, config="{}", is_active=False)
-        return svc
-
-    def test_bind_service(self, svc, bk_module):
-        mgr = LocalServiceMgr()
-        service = mgr.get(svc.uuid, region=bk_module.region)
-
-        with pytest.raises(BindServiceNoPlansError):
-            mgr.bind_service(service, bk_module)
-
-    def test_list_by_category(self, svc, bk_app):
-        mgr = LocalServiceMgr()
-        found = False
-        for service in mgr.list_by_category(
-            category_id=Category.DATA_STORAGE, region=bk_app.region, include_hidden=True
-        ):
-            if service.uuid == str(svc.uuid):
-                found = True
-                break
-
-        assert found
+        for _id, expected_val in expect_obj.values():
+            assert mgr.get_attachment_by_instance_id(svc, _id) == expected_val

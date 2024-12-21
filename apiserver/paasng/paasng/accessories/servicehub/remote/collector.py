@@ -15,8 +15,8 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Collector for remote services
-"""
+"""Collector for remote services"""
+
 import logging
 from collections import namedtuple
 from typing import Dict, Generator, List, Optional
@@ -96,7 +96,7 @@ class RemoteSpecDefinitionSLZ(serializers.Serializer):
 class RemotePlanSLZ(serializers.Serializer):
     uuid = serializers.CharField()
     name = serializers.CharField()
-    properties = serializers.JSONField()
+    properties = serializers.JSONField(default=dict)
     description = serializers.CharField()
     specifications = serializers.DictField(child=serializers.CharField(allow_null=True), default=dict, allow_null=True)
     is_active = serializers.BooleanField(required=False, default=True)

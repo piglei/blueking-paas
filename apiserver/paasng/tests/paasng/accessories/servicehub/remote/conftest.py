@@ -86,3 +86,13 @@ def bk_plan_r1_v2():
 @pytest.fixture()
 def bk_plan_r2_v1():
     return gen_plan(region="r2", specifications={"version": "1", "app_zone": "2"}, properties={})
+
+
+# @pytest.fixture()
+# def bk_plan_1():
+#     return create_random_plan()
+#
+#
+# @pytest.fixture()
+# def bk_plan_2():
+#     return create_random_plan()

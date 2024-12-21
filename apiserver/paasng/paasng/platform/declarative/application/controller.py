@@ -312,7 +312,7 @@ class AppDeclarativeController:
                     continue
 
                 logger.info('Bind service "%s" to Module "%s".', service.name, module)
-                mixed_service_mgr.bind_service(obj, module, specs=service.specs)
+                mixed_service_mgr.bind_service(obj, module)
 
     def save_description(self, desc: ApplicationDesc, application: Application, is_creation: bool):
         """Save description to database

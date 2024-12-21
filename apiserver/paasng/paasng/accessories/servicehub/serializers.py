@@ -46,7 +46,6 @@ class ServiceMinimalSLZ(serializers.Serializer):
     display_name = serializers.CharField()
     description = serializers.CharField()
     category = CategorySLZ()
-    specifications = serializers.ListField(child=SpecDefinitionSLZ(), source="public_specifications")
 
 
 class ServiceCategoryByRegionSLZ(serializers.Serializer):
@@ -64,7 +63,6 @@ class ServiceSLZ(serializers.Serializer):
     description = serializers.CharField()
     long_description = serializers.CharField()
     category = CategorySLZ()
-    specifications = serializers.ListField(child=SpecDefinitionSLZ(), source="public_specifications")
     instance_tutorial = serializers.CharField()
     is_ready = serializers.SerializerMethodField()
 

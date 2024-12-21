@@ -15,13 +15,11 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Unit tests for ceph provider
-"""
-import string
-import uuid
-from typing import Optional
+"""Unit tests for ceph provider"""
 
-from paasng.accessories.servicehub.services import PlanObj, ServiceObj, ServiceSpecificationDefinition
+import uuid
+
+from paasng.accessories.servicehub.services import PlanObj, ServiceObj
 from tests.utils.helpers import generate_random_string
 
 SERVICE_COMMON_ARGS: dict = dict(
@@ -47,15 +45,4 @@ def gen_plan(region: str, specifications: dict):
         region=region,
         specifications=specifications,
         properties={},
-    )
-
-
-def generate_ssd(name: Optional[str] = None, recommended_value=None):
-    """生成随机的 ServiceSpecificationDefinition"""
-    name = name or generate_random_string(chars=string.ascii_letters)
-    return ServiceSpecificationDefinition(
-        name=name,
-        display_name=name,
-        recommended_value=recommended_value,
-        description="",
     )

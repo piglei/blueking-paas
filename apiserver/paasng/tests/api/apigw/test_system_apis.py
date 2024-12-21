@@ -15,7 +15,6 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-import json
 from operator import attrgetter
 from unittest import mock
 
@@ -26,6 +25,7 @@ from django.utils.translation import override
 from django_dynamic_fixture import G
 
 from paas_wl.infras.cluster.models import Cluster
+from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
 from paasng.accessories.servicehub.constants import Category
 from paasng.accessories.servicehub.manager import ServiceObjNotFound
 from paasng.accessories.servicehub.models import ServiceEngineAppAttachment
@@ -41,6 +41,7 @@ from paasng.platform.applications.constants import ApplicationType
 from paasng.platform.applications.operators import get_contact_info
 from paasng.platform.engine.constants import OperationTypes
 from paasng.platform.engine.models.operations import ModuleEnvironmentOperations
+from tests.paasng.accessories.servicehub.test_manager import mixed_service_mgr
 from tests.paasng.platform.engine.setup_utils import create_fake_deployment
 from tests.utils.auth import create_user
 from tests.utils.helpers import create_legacy_application, generate_random_string
@@ -228,26 +229,10 @@ class TestSysAddonsAPIViewSet:
             category=category,
             region=bk_app.region,
             logo_b64="dummy",
-            config={
-                "specifications": [
-                    {"name": "instance_type", "description": "", "recommended_value": "ha"},
-                    {"name": "version", "description": "", "recommended_value": "5.0.0"},
-                ]
-            },
+            config={},
         )
         # Create default plans
-        G(
-            Plan,
-            name="no-ha",
-            service=svc,
-            config=json.dumps({"specifications": {"instance_type": "no-ha"}}),
-        )
-        G(
-            Plan,
-            name="ha",
-            service=svc,
-            config=json.dumps({"specifications": {"instance_type": "ha"}}),
-        )
+        G(Plan, name="plan-1", service=svc)
         return svc
 
     def test_query_credentials(self, bk_app, bk_module, service_name, mixed_service_mgr, sys_api_client):
@@ -265,23 +250,15 @@ class TestSysAddonsAPIViewSet:
         response = sys_api_client.get(url)
         assert response.status_code == 404
 
-    @pytest.mark.parametrize(
-        ("specs", "expected_code"),
-        [
-            ({}, 200),
-            ({"instance_type": "no-ha"}, 200),
-            ({"instance_type": "test"}, 400),
-            ({"instance_type": "no-ha", "version": "3.5"}, 400),
-            ({"unknown_spec_name": ""}, 400),
-        ],
-    )
     @mock.patch("paasng.accessories.servicehub.local.manager.LocalEngineAppInstanceRel.provision", return_value=None)
-    def test_provision_service(
-        self, provision, bk_app, bk_module, bk_stag_env, sys_api_client, service, specs, expected_code
-    ):
+    def test_provision_service(self, provision, bk_app, bk_module, bk_stag_env, sys_api_client, service):
+        # Create the binding policy
+        svc_obj = mixed_service_mgr.get_without_region(service.uuid)
+        ServiceBindingPolicyManager(svc_obj).set_static([svc_obj.get_plans()[0]])
+
         url = f"/sys/api/bkapps/applications/{bk_app.code}/modules/{bk_module.name}/envs/stag/addons/{service.name}/"
-        response = sys_api_client.post(url, data={"specs": specs})
-        assert response.status_code == expected_code
+        response = sys_api_client.post(url, data={})
+        assert response.status_code == 200
 
     def test_retrieve_specs(self, bk_app, bk_module, bk_stag_env, sys_api_client, service):
         url = f"/sys/api/bkapps/applications/{bk_app.code}/modules/{bk_module.name}/services/{service.uuid}/specs/"
@@ -289,13 +266,13 @@ class TestSysAddonsAPIViewSet:
             ServiceEngineAppAttachment,
             engine_app=bk_stag_env.get_engine_app(),
             service=service,
-            plan=Plan.objects.get(service=service, name="ha"),
+            plan=Plan.objects.get(service=service, name="plan-1"),
         )
         with mock.patch("paasng.plat_admin.system.views.mixed_service_mgr.module_is_bound_with"):
             response = sys_api_client.get(url)
         assert response.status_code == 200
         data = response.json()["results"]
-        assert data == {"instance_type": "ha", "version": None}
+        assert data == {}
 
     def test_retrieve_specs_but_unprovision(self, bk_app, bk_module, sys_api_client, service):
         url = f"/sys/api/bkapps/applications/{bk_app.code}/modules/{bk_module.name}/services/{service.uuid}/specs/"
@@ -303,7 +280,7 @@ class TestSysAddonsAPIViewSet:
             response = sys_api_client.get(url)
         assert response.status_code == 200
         data = response.json()["results"]
-        assert data == {"instance_type": None, "version": None}
+        assert data == {}
 
 
 class TestClusterNamespaceInfoViewSet:
