@@ -189,7 +189,7 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
         application = get_object_or_404(Application, code=code)
         engine_app = application.get_engine_app(environment, module_name=module_name)
         try:
-            svc = mixed_service_mgr.find_by_name(name=service_name, region=application.region)
+            svc = mixed_service_mgr.find_by_name(name=service_name)
         except ServiceObjNotFound:
             logger.info("service named '%s' not found", service_name)
             raise Http404(f"service named '{service_name}' not found")
@@ -209,7 +209,7 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
         engine_app = application.get_engine_app(environment, module_name=module_name)
 
         try:
-            svc = mixed_service_mgr.find_by_name(name=service_name, region=application.region)
+            svc = mixed_service_mgr.find_by_name(name=service_name)
         except ServiceObjNotFound:
             raise error_codes.CANNOT_PROVISION_INSTANCE.f(f"addon named '{service_name}' not found")
 
@@ -250,7 +250,7 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
         """
         application = get_object_or_404(Application, code=code)
         module = application.get_module(module_name)
-        service = mixed_service_mgr.get_or_404(service_id, region=application.region)
+        service = mixed_service_mgr.get_or_404(service_id)
 
         # 如果模块与增强服务之间没有绑定关系，直接返回 404 状态码
         if not mixed_service_mgr.module_is_bound_with(service, module):
@@ -296,7 +296,7 @@ class LessCodeSystemAPIViewSet(viewsets.ViewSet):
         svc = None
         for service_name in ["gcs_mysql", "mysql"]:
             try:
-                svc = mixed_service_mgr.find_by_name(name=service_name, region=application.region)
+                svc = mixed_service_mgr.find_by_name(name=service_name)
             except ServiceObjNotFound:
                 continue
             break

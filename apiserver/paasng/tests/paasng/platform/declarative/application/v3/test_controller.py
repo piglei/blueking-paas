@@ -319,7 +319,7 @@ class TestServicesField:
             G(Plan, name="plan-2", service=svc, config="{}", is_active=True)
 
             # Create a default binding polity so that the binding works by default
-            service = mixed_service_mgr.get(svc.uuid, region=settings.DEFAULT_REGION_NAME)
+            service = mixed_service_mgr.get(svc.uuid)
             ServiceBindingPolicyManager(service).set_static([service.get_plans()[0]])
 
     @pytest.fixture()
@@ -341,7 +341,7 @@ class TestServicesField:
         controller = AppDeclarativeController(bk_user)
         controller.perform_action(get_app_description(app_desc))
 
-        service_obj = mixed_service_mgr.find_by_name("mysql", settings.DEFAULT_REGION_NAME)
+        service_obj = mixed_service_mgr.find_by_name("mysql")
         application = Application.objects.get(code=random_name)
         assert mixed_service_mgr.module_is_bound_with(service_obj, application.get_default_module()) is True
 
@@ -350,7 +350,7 @@ class TestServicesField:
         controller.perform_action(get_app_description(app_desc))
 
         # Add a new service
-        service_obj = mixed_service_mgr.find_by_name("rabbitmq", settings.DEFAULT_REGION_NAME)
+        service_obj = mixed_service_mgr.find_by_name("rabbitmq")
         module = Application.objects.get(code=random_name).get_default_module()
 
         assert mixed_service_mgr.module_is_bound_with(service_obj, module) is False

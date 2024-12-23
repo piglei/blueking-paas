@@ -43,7 +43,6 @@ NOTSET = object()
 class ServiceObj:
     """A universal service object"""
 
-    region: str
     uuid: str
     name: str
     logo: str = field(compare=False)
@@ -75,8 +74,6 @@ class PlanObj:
     description: str
     is_active: bool
     is_eager: bool
-    region: str
-    specifications: Dict[str, str]
     properties: Dict
     config: Dict = field(default_factory=dict)
 
@@ -204,9 +201,7 @@ class BaseServiceMgr(metaclass=ABCMeta):
     service_obj_cls = ServiceObj
 
     @abstractmethod
-    def list_by_category(
-        self, region: str, category_id: int, include_hidden: bool = False
-    ) -> Generator[ServiceObj, None, None]:
+    def list_by_category(self, category_id: int, include_hidden: bool = False) -> Generator[ServiceObj, None, None]:
         raise NotImplementedError
 
     @abstractmethod
@@ -257,11 +252,11 @@ class BaseServiceMgr(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def get(self, uuid: str, region: str) -> ServiceObj:
+    def get(self, uuid) -> ServiceObj:
         raise NotImplementedError
 
     @abstractmethod
-    def find_by_name(self, name: str, region: str) -> ServiceObj:
+    def find_by_name(self, name: str) -> ServiceObj:
         raise NotImplementedError
 
     @abstractmethod

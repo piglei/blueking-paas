@@ -213,7 +213,6 @@ class ServiceSetGroupByName:
     available_languages: str
     instance_tutorial: str
 
-    enabled_regions: List[str] = field(default_factory=list)
     services: List[ServiceObj] = field(default_factory=list)
     instances: List[object] = field(default_factory=list)
 
@@ -228,10 +227,6 @@ class ServiceSetGroupByName:
             available_languages=service.available_languages,
             instance_tutorial=service.instance_tutorial,
         )
-
-    def add_enabled_region(self, region: str):
-        if region not in self.enabled_regions:
-            self.enabled_regions.append(region)
 
 
 class ServiceBindingPolicy(AuditedModel):

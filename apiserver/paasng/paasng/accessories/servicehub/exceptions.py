@@ -62,10 +62,6 @@ class DuplicatedServiceBoundError(BaseServicesException):
     """
 
 
-class BindServiceNoPlansError(Exception):
-    """When binding a service, appropriate plans cannot be found for all environments."""
-
-
 class BindServicePlanError(Exception):
     """Unable to get the right plan object when binding a service."""
 

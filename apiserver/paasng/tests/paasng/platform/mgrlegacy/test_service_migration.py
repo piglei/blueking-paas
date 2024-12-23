@@ -19,7 +19,6 @@ import uuid
 from unittest import mock
 
 import pytest
-from django.conf import settings
 
 from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
 from paasng.accessories.servicehub.models import RemoteServiceEngineAppAttachment, RemoteServiceModuleAttachment
@@ -36,20 +35,17 @@ pytestmark = [
 
 
 dummy_service = RemoteServiceObj(
-    region=settings.DEFAULT_REGION_NAME,
     uuid="00000000-0000-0000-0000-000000000000",
     name="dummy-service",
     logo="",
     is_visible=True,
     plans=[
         RemotePlanObj(
-            region=settings.DEFAULT_REGION_NAME,
             uuid="11111111-1111-1111-1111-111111111111",
             name="dummy-plan",
             description="dummy plan",
             is_eager=True,
             is_active=True,
-            specifications={},
             properties={},
         )
     ],

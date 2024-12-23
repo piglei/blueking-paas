@@ -77,7 +77,6 @@ class PlanObjSLZ(serializers.Serializer):
     description = serializers.CharField()
     config = serializers.JSONField(required=False, default=dict)
     is_active = serializers.BooleanField()
-    specifications = serializers.JSONField()
     properties = serializers.JSONField(required=False, default=dict)
 
 

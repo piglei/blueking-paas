@@ -293,7 +293,7 @@ class AppDeclarativeController:
         """Sync services related field for single module."""
         for service in services:
             try:
-                obj = mixed_service_mgr.find_by_name(service.name, region=module.region)
+                obj = mixed_service_mgr.find_by_name(service.name)
             except ServiceObjNotFound:
                 logger.warning('Skip binding, service called "%s" not found', service.name)
                 continue

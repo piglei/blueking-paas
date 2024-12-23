@@ -29,12 +29,12 @@ SERVICE_COMMON_ARGS: dict = dict(
 )
 
 
-def gen_service(region: str):
+def gen_service():
     name = generate_random_string()
-    return ServiceObj(region=region, uuid=str(uuid.uuid4()), name=name, display_name=name, **SERVICE_COMMON_ARGS)
+    return ServiceObj(uuid=str(uuid.uuid4()), name=name, display_name=name, **SERVICE_COMMON_ARGS)
 
 
-def gen_plan(region: str, specifications: dict):
+def gen_plan():
     name = generate_random_string()
     return PlanObj(
         uuid=str(uuid.uuid4()),
@@ -42,7 +42,5 @@ def gen_plan(region: str, specifications: dict):
         description=generate_random_string(),
         is_active=True,
         is_eager=False,
-        region=region,
-        specifications=specifications,
         properties={},
     )

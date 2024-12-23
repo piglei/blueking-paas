@@ -20,10 +20,11 @@
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Generator, Iterator, List, Optional, cast
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, Generator, Iterable, Iterator, List, Optional, cast
 
 import arrow
+import cattrs
 from django.db.models import QuerySet
 from django.db.transaction import atomic
 from django.utils.functional import cached_property
@@ -36,7 +37,7 @@ from paasng.accessories.servicehub.binding_policy.selector import get_plan_by_en
 from paasng.accessories.servicehub.exceptions import BindServicePlanError
 from paasng.accessories.servicehub.models import RemoteServiceEngineAppAttachment, RemoteServiceModuleAttachment
 from paasng.accessories.servicehub.remote.client import RemoteServiceClient
-from paasng.accessories.servicehub.remote.collector import RemoteSpecDefinitionUpdateSLZ, refresh_remote_service
+from paasng.accessories.servicehub.remote.collector import refresh_remote_service
 from paasng.accessories.servicehub.remote.exceptions import (
     GetClusterEgressInfoError,
     ServiceNotFound,
@@ -54,7 +55,6 @@ from paasng.accessories.servicehub.services import (
     ServiceObj,
 )
 from paasng.accessories.services.models import ServiceCategory
-from paasng.core.region.models import get_all_regions
 from paasng.infras.bkmonitorv3.shim import get_or_create_bk_monitor_space
 from paasng.misc.metrics import SERVICE_PROVISION_COUNTER
 from paasng.platform.applications.models import Application, ApplicationEnvironment, ModuleEnvironment
@@ -108,14 +108,8 @@ class RemotePlanObj(PlanObj):
         data.setdefault("is_active", True)
         properties = data.get("properties") or {}
         is_eager = data.pop("is_eager", False)
-        region = data.pop("region", "")
         config = data.pop("config", {})
-        return cls(
-            is_eager=properties.get("is_eager", is_eager),
-            region=properties.get("region", region),
-            config=config,
-            **data,
-        )
+        return cattrs.structure({"is_eager": properties.get("is_eager", is_eager), "config": config} | data, cls)
 
 
 @dataclass
@@ -127,21 +121,19 @@ class RemoteServiceObj(ServiceObj):
     category_id = None
 
     @classmethod
-    def from_data(cls, service: Dict, region=None) -> "RemoteServiceObj":
+    def from_data(cls, service: Dict) -> "RemoteServiceObj":
         field_names = list(cls.__dataclass_fields__.keys())  # type: ignore
         fields: Dict[str, Any] = {k: service.get(k) for k in field_names if k in service}
-        fields["region"] = region
-
-        fields["plans"] = [RemotePlanObj.from_data(i) for i in fields.get("plans") or ()]
+        fields["plans"] = [asdict(RemotePlanObj.from_data(i)) for i in fields.get("plans") or ()]
 
         # Set up meta info
         meta_info_data = service.get("_meta_info")
         if not meta_info_data:
-            fields["meta_info"] = DEFAULT_META_INFO
+            fields["meta_info"] = {"version": None}
         else:
-            fields["meta_info"] = MetaInfo(version=meta_info_data["version"])
+            fields["meta_info"] = {"version": meta_info_data["version"]}
 
-        result = cls(**fields)
+        result = cattrs.structure(fields, cls)
         result._data = service
         result.category_id = service["category"]
         return result
@@ -202,10 +194,8 @@ class RemoteEngineAppInstanceRel(EngineAppInstanceRel):
         self.remote_config = self.store.get_source_config(str(self.db_obj.service_id))
         self.remote_client = RemoteServiceClient(self.remote_config)
 
-        self.region = self.db_application.region
-
     def get_service(self) -> RemoteServiceObj:
-        return self.mgr.get(str(self.db_obj.service_id), region=self.db_application.region)
+        return self.mgr.get(str(self.db_obj.service_id))
 
     def is_provisioned(self) -> bool:
         return self.db_obj.service_instance_id is not None
@@ -344,7 +334,7 @@ class RemoteEngineAppInstanceRel(EngineAppInstanceRel):
         if plan_id == str(constants.LEGACY_PLAN_ID):
             return RemotePlanObj.from_data(constants.LEGACY_PLAN_INSTANCE)
 
-        svc_data = self.store.get(str(self.db_obj.service_id), region=self.db_application.region)
+        svc_data = self.store.get(str(self.db_obj.service_id))
         for d in svc_data["plans"]:
             if d["uuid"] == plan_id:
                 return RemotePlanObj.from_data(d)
@@ -367,7 +357,7 @@ class RemotePlainInstanceMgr(PlainInstanceMgr):
         self.remote_client = self.get_remote_client()
 
     def get_service(self) -> RemoteServiceObj:
-        return self.mgr.get(str(self.db_obj.service_id), region=self.db_application.region)
+        return self.mgr.get(str(self.db_obj.service_id))
 
     def get_remote_client(self):
         remote_config = self.mgr.store.get_source_config(str(self.db_obj.service_id))
@@ -468,64 +458,55 @@ class RemoteServiceMgr(BaseServiceMgr):
     def __init__(self, store: RemoteServiceStore):
         self.store = store
 
-    def get(self, uuid: str, region: str) -> RemoteServiceObj:
+    def get(self, uuid: str) -> RemoteServiceObj:
         """Get a single service by given uuid
 
         :raises: ServiceObjNotFound
         """
         try:
-            obj = self.store.get(uuid, region)
+            obj = self.store.get(uuid)
         except (ServiceNotFound, RuntimeError) as e:
             raise exceptions.ServiceObjNotFound(f"Service with id={uuid} not found in remote") from e
-        return RemoteServiceObj.from_data(obj, region=region)
+        return RemoteServiceObj.from_data(obj)
 
-    def find_by_name(self, name: str, region: str) -> RemoteServiceObj:
+    def find_by_name(self, name: str) -> RemoteServiceObj:
         """Find a single service by service name
 
         :raises: ServiceObjNotFound
         """
-        objs = self.store.filter(region, conditions={"name": name})
+        objs = self.store.filter(conditions={"name": name})
         if not objs:
             raise exceptions.ServiceObjNotFound(f"Service with name={name} not found in remote")
         # Use the first matched services objects
-        return RemoteServiceObj.from_data(objs[0], region=region)
+        return RemoteServiceObj.from_data(objs[0])
 
-    def list_by_category(
-        self, region: str, category_id: int, include_hidden=False
-    ) -> Generator[ServiceObj, None, None]:
+    def list_by_category(self, category_id: int, include_hidden=False) -> Generator[ServiceObj, None, None]:
         """query a list of services by category"""
-        items = self.store.filter(region, conditions={"category": category_id})
+        items = self.store.filter(conditions={"category": category_id})
         for svc in items:
-            obj = RemoteServiceObj.from_data(svc, region=region)
+            obj = RemoteServiceObj.from_data(svc)
             # Ignore services which is_visible field is False
             if not include_hidden and not svc["is_visible"]:
                 continue
             yield obj
 
-    def list_by_region(self, region: str, include_hidden=False) -> Generator[ServiceObj, None, None]:
-        """query a list of services by region"""
-        items = self.store.filter(region)
-        for svc in items:
-            # Ignore services which is_visible field is False
-            if not include_hidden and not svc["is_visible"]:
-                continue
-
-            yield RemoteServiceObj.from_data(svc, region=region)
-
-    def list(self) -> Generator[ServiceObj, None, None]:
-        """query all list of services"""
+    def list_visible(self) -> Iterable[ServiceObj]:
+        """list visible services."""
         items = self.store.all()
         for svc in items:
-            yield RemoteServiceObj.from_data(svc, region=None)
+            if not svc["is_visible"]:
+                continue
+            yield RemoteServiceObj.from_data(svc)
+
+    def list(self) -> Iterable[ServiceObj]:
+        """List all services"""
+        items = self.store.all()
+        for svc in items:
+            yield RemoteServiceObj.from_data(svc)
 
     def _handle_service_data(self, data: Dict) -> Dict:
         # 由于远程增强服务在存储 category_id 的字段命名为 category, 因此这里需要做个重命名
         data["category"] = data.pop("category_id")
-
-        # 远程增强服务的 specification 中的 display_name 是 TranslatedField
-        # 但本地增强服务并无 specification 字段, 仅将这些额外属性存储在 config 字段中
-        # specification.displayname 的国际化目前是由前端来处理
-        data["specifications"] = RemoteSpecDefinitionUpdateSLZ(data["specifications"], many=True).data
         return data
 
     def update(self, service: ServiceObj, data: Dict):
@@ -549,9 +530,9 @@ class RemoteServiceMgr(BaseServiceMgr):
         """List application's bound services"""
         attachments = RemoteServiceModuleAttachment.objects.filter(module=module).values("service_id")
         service_ids = [str(obj["service_id"]) for obj in attachments]
-        for svc in self.store.bulk_get(service_ids, region=module.region):
+        for svc in self.store.bulk_get(service_ids):
             if svc:
-                obj = RemoteServiceObj.from_data(svc, region=module.region)
+                obj = RemoteServiceObj.from_data(svc)
                 if category_id and category_id != obj.category_id:
                     continue
                 yield obj
@@ -658,16 +639,15 @@ class RemoteServiceMgr(BaseServiceMgr):
         """Get all remote mysql services"""
         service_objects = []
         seen_uuids = set()
-        for region in get_all_regions():
-            for service_name in ["gcs_mysql", "mysql"]:
-                try:
-                    svc = self.find_by_name(name=service_name, region=region)
-                except exceptions.ServiceObjNotFound:
-                    continue
-                if svc.uuid in seen_uuids:
-                    continue
-                seen_uuids.add(svc.uuid)
-                service_objects.append(svc)
+        for service_name in ["gcs_mysql", "mysql"]:
+            try:
+                svc = self.find_by_name(name=service_name)
+            except exceptions.ServiceObjNotFound:
+                continue
+            if svc.uuid in seen_uuids:
+                continue
+            seen_uuids.add(svc.uuid)
+            service_objects.append(svc)
         return service_objects
 
     def get_attachment_by_engine_app(self, service: ServiceObj, engine_app: EngineApp):
@@ -733,7 +713,7 @@ class RemoteServiceBinder:
     def bind(self, module: Module, plan_id: str | None = None, env_plan_id_map: Dict[str, str] | None = None):
         """Create the binding relationship in local database.
 
-        :raises BindServiceNoPlansError: When no appropriate plans can be found.
+        :raises BindServicePlanError: When no appropriate plans can be found.
         """
         svc_module_attachment, _ = RemoteServiceModuleAttachment.objects.get_or_create(
             module=module,

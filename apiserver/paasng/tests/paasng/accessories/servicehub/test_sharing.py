@@ -19,6 +19,7 @@ import json
 from unittest import mock
 
 import pytest
+from django.conf import settings
 from django_dynamic_fixture import G
 
 from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
@@ -40,35 +41,23 @@ pytestmark = [
 ]
 
 
-_region_name = "r1"
-
-
 def create_module(bk_app):
     module = Module.objects.create(region=bk_app.region, application=bk_app, name=generate_random_string(length=8))
     initialize_module(module)
     return module
 
 
-@pytest.fixture(autouse=True)
-def _setup_data(bk_app, bk_module):
-    bk_app.region = _region_name
-    bk_app.save(update_fields=["region"])
-
-    bk_module.region = _region_name
-    bk_module.save(update_fields=["region"])
-
-
 @pytest.fixture()
 def local_service(request):
-    service = G(Service, name="mysql", category=G(ServiceCategory), region=_region_name, logo_b64="dummy")
+    service = G(Service, name="mysql", category=G(ServiceCategory), region=settings.DEFAULT_REGION, logo_b64="dummy")
     G(Plan, name="plan-1", service=service)
     G(Plan, name="plan-2", service=service)
-    return mixed_service_mgr.get(service.uuid, region=_region_name)
+    return mixed_service_mgr.get(service.uuid)
 
 
 @pytest.fixture()
 def remote_service(_faked_remote_services):
-    return mixed_service_mgr.get(data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"], region=_region_name)
+    return mixed_service_mgr.get(data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"])
 
 
 def pick_different_category(service_obj: ServiceObj) -> int:
@@ -80,7 +69,7 @@ def pick_different_category(service_obj: ServiceObj) -> int:
 
 
 @pytest.fixture(params=["local", "remote"])
-def service_obj(request, local_service, remote_service, _setup_data):
+def service_obj(request, local_service, remote_service):
     """
     Service object for testing, this fixture will yield both a remote and a local service
     """
@@ -137,7 +126,7 @@ class TestServiceSharingManager:
             mixed_service_mgr.bind_service(service_obj, bk_module)
 
     def test_create_with_other_app(self, bk_user, bk_app, bk_module, service_obj):
-        another_app = create_app(owner_username=bk_user.username, region=_region_name)
+        another_app = create_app(owner_username=bk_user.username)
         ref_module = another_app.get_default_module()
         mixed_service_mgr.bind_service(service_obj, ref_module)
 
@@ -195,7 +184,7 @@ class TestGetEnvVariables:
     @pytest.fixture(autouse=True)
     def _with_static_binding_policy(self, local_service):
         """Initialize the service binding policy for local service."""
-        service = mixed_service_mgr.get(local_service.uuid, region=_region_name)
+        service = mixed_service_mgr.get(local_service.uuid)
         ServiceBindingPolicyManager(service).set_static([service.get_plans()[0]])
 
     def test_local_integrated(self, bk_app, bk_module, local_service):

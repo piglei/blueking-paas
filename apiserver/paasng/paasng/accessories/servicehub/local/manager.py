@@ -21,9 +21,10 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, Iterator, List, Optional, cast
+from typing import Any, Dict, Generator, Iterable, Iterator, List, Optional, cast
 from uuid import UUID
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db.models import QuerySet
 from django.db.transaction import atomic
@@ -66,23 +67,14 @@ class LocalPlanObj(PlanObj):
 
     @classmethod
     def from_db(cls, plan: Plan) -> "LocalPlanObj":
-        # 向前兼容 no-ha: ["stag"], ha: ["prod"] 的逻辑
-        properties = {
-            "restricted_envs": {"no-ha": [AppEnvName.STAG.value], "ha": [AppEnvName.PROD.value]}.get(
-                plan.name, [AppEnvName.STAG.value, AppEnvName.PROD.value]
-            )
-        }
         config = json.loads(plan.config or "{}")
-        specifications = config.get("specifications") or {}
         instance = cls(
             uuid=str(plan.uuid),
             name=plan.name,
             description=plan.description,
             is_active=plan.is_active,
             is_eager=plan.is_eager,
-            region=plan.service.region,
-            specifications=specifications,
-            properties=properties,
+            properties={},
             config=config,
         )
         instance.db_object = plan
@@ -191,34 +183,38 @@ class LocalServiceMgr(BaseServiceMgr):
 
     service_obj_cls = LocalServiceObj
 
-    def get(self, uuid: str, region: str) -> LocalServiceObj:
+    def get(self, uuid: str) -> LocalServiceObj:
         """Get a single service by given uuid
 
         :raises: ServiceObjNotFound
         """
+        # INFO: After using BindingPolicy for service plan selection, the local service
+        # doesn't support the region field anymore, only the object using the default region
+        # will be returned.
         try:
-            obj = Service.objects.get(uuid=uuid, region=region)
+            obj = Service.objects.get(uuid=uuid, region=settings.DEFAULT_REGION)
         except (Service.DoesNotExist, ValidationError) as e:
             raise ServiceObjNotFound(f"Service with id={uuid} not found in database") from e
         return LocalServiceObj.from_db_object(obj)
 
-    def find_by_name(self, name: str, region: str) -> LocalServiceObj:
+    def find_by_name(self, name: str) -> LocalServiceObj:
         """Find a single service by service name
 
         :raises: ServiceObjNotFound
         """
         try:
-            obj = Service.objects.get(name=name, region=region)
+            obj = Service.objects.get(name=name, region=settings.DEFAULT_REGION)
         except Service.DoesNotExist as e:
             raise ServiceObjNotFound(f"Service with name={name} not found in database") from e
         return LocalServiceObj.from_db_object(obj)
 
-    def list_by_category(
-        self, region: str, category_id: int, include_hidden=False
-    ) -> Generator[ServiceObj, None, None]:
+    def list_by_category(self, category_id: int, include_hidden=False) -> Generator[ServiceObj, None, None]:
         """query a list of services by category"""
+        # INFO: After using BindingPolicy for service plan selection, the local service
+        # doesn't support the region field anymore, only the object using the default region
+        # will be returned.
         services = Service.objects.filter(
-            region=region,
+            region=settings.DEFAULT_REGION,
             category=category_id,
             is_active=True,
         )
@@ -227,19 +223,17 @@ class LocalServiceMgr(BaseServiceMgr):
         for svc in services:
             yield LocalServiceObj.from_db_object(svc)
 
-    def list_by_region(self, region: str, include_hidden=False) -> Generator[ServiceObj, None, None]:
-        """query a list of services by region"""
-        services = Service.objects.filter(region=region, is_active=True, is_visible=True)
+    def list_visible(self) -> Iterable[ServiceObj]:
+        """list all Services that is not hidden"""
+        services = Service.objects.filter(region=settings.DEFAULT_REGION, is_active=True)
         for svc in services:
-            # Ignore services which is_visible field is False
-            if not include_hidden and not svc.is_visible:
+            if not svc.is_visible:
                 continue
-
             yield LocalServiceObj.from_db_object(svc)
 
-    def list(self) -> Generator[ServiceObj, None, None]:
-        """query all list of services"""
-        services = Service.objects.all()
+    def list(self) -> Iterable[ServiceObj]:
+        """List all services"""
+        services = Service.objects.filter(region=settings.DEFAULT_REGION)
         for svc in services:
             yield LocalServiceObj.from_db_object(svc)
 
@@ -247,9 +241,9 @@ class LocalServiceMgr(BaseServiceMgr):
         """该方法负责将 ServiceObj 的数据格式转换成 in-database 的 Service 对象的存储格式"""
         # 丢弃 uuid 属性, 防止主键意外变更
         data.pop("uuid", None)
-        # 由于本地增强服务并无 specifications/provider_name 等字段, 因此将这些额外属性存储在 config 字段中
+        # 由于本地增强服务并无 provider_name 等字段, 因此将这些额外属性存储在 config 字段中
         data.setdefault("config", {})
-        for key, default in [("specifications", []), ("provider_name", None)]:  # type: ignore
+        for key, default in [("provider_name", None)]:  # type: ignore
             data["config"][key] = data.pop(key, default)
         # logo_64 直接存储 base64 格式的链接(也支持存储外链), 这里将 logo 重命名为 logo_b64, 以直接存储 base64 格式的图片
         data["logo_b64"] = data.pop("logo")
@@ -442,11 +436,7 @@ class LocalPlanMgr(BasePlanMgr):
         """该方法负责将 PlanObj 的数据格式转换成 in-database 的 Plan 对象的存储格式"""
         # 丢弃 uuid 属性, 防止主键意外变更
         data.pop("uuid", None)
-        # 由于本地增强服务方案并无 specifications 等字段, 因此将这些额外属性存储在 config 字段中
         data.setdefault("config", {})
-        for key, default in [("specifications", {})]:  # type: ignore
-            data["config"][key] = data.pop(key, default)
-
         # Plan 的 config 属性不是 JsonField, 因此需要 json.dumps
         data["config"] = json.dumps(data["config"])
         return data
@@ -486,7 +476,7 @@ class LocalServiceBinder:
     def bind(self, module: Module, plan_id: str | None, env_plan_id_map: dict[str, str] | None):
         """Create the binding relationship in local database.
 
-        :raises BindServiceNoPlansError: When no appropriate plans can be found.
+        :raises BindServicePlanError: When no appropriate plans can be found.
         """
         svc_module_attachment, _ = ServiceModuleAttachment.objects.get_or_create(
             service=self.service.db_object, module=module

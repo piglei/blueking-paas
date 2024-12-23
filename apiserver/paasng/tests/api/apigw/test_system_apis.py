@@ -253,7 +253,7 @@ class TestSysAddonsAPIViewSet:
     @mock.patch("paasng.accessories.servicehub.local.manager.LocalEngineAppInstanceRel.provision", return_value=None)
     def test_provision_service(self, provision, bk_app, bk_module, bk_stag_env, sys_api_client, service):
         # Create the binding policy
-        svc_obj = mixed_service_mgr.get_without_region(service.uuid)
+        svc_obj = mixed_service_mgr.get(service.uuid)
         ServiceBindingPolicyManager(svc_obj).set_static([svc_obj.get_plans()[0]])
 
         url = f"/sys/api/bkapps/applications/{bk_app.code}/modules/{bk_module.name}/envs/stag/addons/{service.name}/"

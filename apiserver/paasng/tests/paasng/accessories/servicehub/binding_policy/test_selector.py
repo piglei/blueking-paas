@@ -17,6 +17,7 @@
 
 
 import pytest
+from django.conf import settings
 from django_dynamic_fixture import G
 
 from paas_wl.infras.cluster.models import Cluster
@@ -42,23 +43,19 @@ pytestmark = [
 ]
 
 
-# The default region value
-region = "r1"
-
-
 @pytest.fixture()
 def local_service():
-    service = G(Service, name="mysql", category=G(ServiceCategory), region=region, logo_b64="dummy")
+    service = G(Service, name="mysql", category=G(ServiceCategory), region=settings.DEFAULT_REGION, logo_b64="dummy")
     # Create some plans
     G(Plan, name=generate_random_string(), service=service)
     G(Plan, name=generate_random_string(), service=service)
-    return mixed_service_mgr.get(service.uuid, region=region)
+    return mixed_service_mgr.get(service.uuid)
 
 
 @pytest.fixture()
 @pytest.mark.usefixture("_faked_remote_services")
 def remote_service(_faked_remote_services):
-    return mixed_service_mgr.get(data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"], region=region)
+    return mixed_service_mgr.get(data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"])
 
 
 @pytest.fixture(params=["local", "remote"])
