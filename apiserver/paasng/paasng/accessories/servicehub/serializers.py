@@ -171,17 +171,17 @@ class ServiceInstanceInfoSLZ(serializers.Serializer):
 
 
 # 增强服务按名称聚合
-class ServiceSetGroupByNameSLZ(serializers.Serializer):
+class ServiceWithInstsSLZ(serializers.Serializer):
+    uuid = serializers.CharField()
     name = serializers.CharField()
     logo = serializers.CharField()
+    category = CategorySLZ()
     display_name = serializers.CharField()
     description = serializers.CharField()
     long_description = serializers.CharField(allow_null=True, default="")
     available_languages = serializers.CharField(default="")
     instance_tutorial = serializers.CharField(default="")
 
-    enabled_regions = serializers.ListField(child=serializers.CharField())
-    services = serializers.ListField(child=ServiceMinimalSLZ())
     instances = serializers.ListField(allow_null=True, child=ServiceAttachmentDetailedSLZ())
 
 

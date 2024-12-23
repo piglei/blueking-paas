@@ -47,7 +47,7 @@ class TestMixedMgr:
 
         # Add a service in database
         category = G(ServiceCategory, id=Category.DATA_STORAGE)
-        G(Service, category=category, region=settings.DEFAULT_REGION, logo_b64="dummy")
+        G(Service, category=category, region=settings.DEFAULT_REGION_NAME, logo_b64="dummy")
 
         services = list(mixed_service_mgr.list_by_category(category_id=Category.DATA_STORAGE))
         assert len(services) == 2
@@ -58,7 +58,7 @@ class TestMixedMgr:
 
         # Add a service in database
         category = G(ServiceCategory, id=Category.DATA_STORAGE)
-        G(Service, category=category, region=settings.DEFAULT_REGION, logo_b64="dummy")
+        G(Service, category=category, region=settings.DEFAULT_REGION_NAME, logo_b64="dummy")
 
         assert len(list(mixed_service_mgr.list_visible())) == 3
 
@@ -69,7 +69,7 @@ class TestMixedMgr:
     def test_get_local_found(self):
         # Add a service in database
         category = G(ServiceCategory, id=Category.DATA_STORAGE)
-        svc = G(Service, category=category, region=settings.DEFAULT_REGION, logo_b64="dummy")
+        svc = G(Service, category=category, region=settings.DEFAULT_REGION_NAME, logo_b64="dummy")
 
         obj = mixed_service_mgr.get(str(svc.uuid))
         assert obj is not None
@@ -81,7 +81,7 @@ class TestMixedMgr:
     def test_find_by_name_local_found(self):
         # Add a service in database
         category = G(ServiceCategory, id=Category.DATA_STORAGE)
-        svc = G(Service, category=category, region=settings.DEFAULT_REGION, logo_b64="dummy")
+        svc = G(Service, category=category, region=settings.DEFAULT_REGION_NAME, logo_b64="dummy")
 
         obj = mixed_service_mgr.find_by_name(str(svc.name))
         assert obj is not None

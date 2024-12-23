@@ -192,7 +192,7 @@ class LocalServiceMgr(BaseServiceMgr):
         # doesn't support the region field anymore, only the object using the default region
         # will be returned.
         try:
-            obj = Service.objects.get(uuid=uuid, region=settings.DEFAULT_REGION)
+            obj = Service.objects.get(uuid=uuid, region=settings.DEFAULT_REGION_NAME)
         except (Service.DoesNotExist, ValidationError) as e:
             raise ServiceObjNotFound(f"Service with id={uuid} not found in database") from e
         return LocalServiceObj.from_db_object(obj)
@@ -203,7 +203,7 @@ class LocalServiceMgr(BaseServiceMgr):
         :raises: ServiceObjNotFound
         """
         try:
-            obj = Service.objects.get(name=name, region=settings.DEFAULT_REGION)
+            obj = Service.objects.get(name=name, region=settings.DEFAULT_REGION_NAME)
         except Service.DoesNotExist as e:
             raise ServiceObjNotFound(f"Service with name={name} not found in database") from e
         return LocalServiceObj.from_db_object(obj)
@@ -214,7 +214,7 @@ class LocalServiceMgr(BaseServiceMgr):
         # doesn't support the region field anymore, only the object using the default region
         # will be returned.
         services = Service.objects.filter(
-            region=settings.DEFAULT_REGION,
+            region=settings.DEFAULT_REGION_NAME,
             category=category_id,
             is_active=True,
         )
@@ -225,7 +225,7 @@ class LocalServiceMgr(BaseServiceMgr):
 
     def list_visible(self) -> Iterable[ServiceObj]:
         """list all Services that is not hidden"""
-        services = Service.objects.filter(region=settings.DEFAULT_REGION, is_active=True)
+        services = Service.objects.filter(region=settings.DEFAULT_REGION_NAME, is_active=True)
         for svc in services:
             if not svc.is_visible:
                 continue
@@ -233,7 +233,7 @@ class LocalServiceMgr(BaseServiceMgr):
 
     def list(self) -> Iterable[ServiceObj]:
         """List all services"""
-        services = Service.objects.filter(region=settings.DEFAULT_REGION)
+        services = Service.objects.filter(region=settings.DEFAULT_REGION_NAME)
         for svc in services:
             yield LocalServiceObj.from_db_object(svc)
 
@@ -349,13 +349,6 @@ class LocalServiceMgr(BaseServiceMgr):
         """Return the queryset of provisioned db queryset by query condition"""
         modules = Module.objects.filter(application_id__in=application_ids)
         return ServiceModuleAttachment.objects.filter(service_id=service.uuid, module__in=modules)
-
-    def get_provisioned_queryset_by_services(self, services: List[ServiceObj], application_ids: List[str]) -> QuerySet:
-        """Return the queryset of provisioned db queryset by query condition"""
-        modules = Module.objects.filter(application_id__in=application_ids)
-        return ServiceModuleAttachment.objects.filter(
-            service_id__in=[service.uuid for service in services], module__in=modules
-        )
 
     def transform_rel_db_obj(self, obj: ServiceEngineAppAttachment) -> LocalEngineAppInstanceRel:
         """Transform a db attachment to rel instance"""

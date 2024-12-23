@@ -610,13 +610,6 @@ class RemoteServiceMgr(BaseServiceMgr):
             module__in=modules,
         )
 
-    def get_provisioned_queryset_by_services(self, services: List[ServiceObj], application_ids: List[str]) -> QuerySet:
-        modules = Module.objects.filter(application_id__in=application_ids)
-        return RemoteServiceModuleAttachment.objects.filter(
-            service_id__in=[service.uuid for service in services],
-            module__in=modules,
-        )
-
     def transform_rel_db_obj(self, obj: RemoteServiceEngineAppAttachment) -> RemoteEngineAppInstanceRel:
         """Transform a db attachment to rel instance"""
         return RemoteEngineAppInstanceRel(obj, self, self.store)

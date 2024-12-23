@@ -240,10 +240,6 @@ class BaseServiceMgr(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def get_provisioned_queryset_by_services(self, services: List[ServiceObj], application_ids: List[str]) -> QuerySet:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_attachment_by_instance_id(self, service: ServiceObj, service_instance_id: uuid.UUID):
         raise NotImplementedError
 

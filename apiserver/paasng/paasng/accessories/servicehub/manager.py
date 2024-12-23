@@ -19,7 +19,6 @@ import logging
 import operator
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, NamedTuple, Optional, TypeVar, cast
 
-from django.db.models import QuerySet
 from django.http import Http404
 
 from paasng.accessories.servicehub.constants import ServiceBindingType, ServiceType
@@ -183,22 +182,6 @@ class MixedServiceMgr:
     module_is_bound_with = _proxied_svc_dispatcher("module_is_bound_with")
     update = _proxied_svc_dispatcher("update")
     destroy = _proxied_svc_dispatcher("destroy")
-
-    def get_provisioned_queryset_by_services(self, services: List[ServiceObj], application_ids: List[str]) -> QuerySet:
-        joined_qs = None
-        for mgr in self.mgr_instances:
-            mgr_services = [service for service in services if isinstance(service, mgr.service_obj_cls)]
-            if not mgr_services:
-                continue
-
-            qs = mgr.get_provisioned_queryset_by_services(mgr_services, application_ids)
-            if joined_qs is None:
-                joined_qs = qs
-            else:
-                joined_qs = joined_qs.union(qs)
-        if joined_qs is None:
-            raise ValueError(f"{services} is an invalid service list")
-        return joined_qs
 
     # Dispatch via service type end
 

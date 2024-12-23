@@ -39,7 +39,6 @@ from paasng.accessories.servicehub.exceptions import (
     SharedAttachmentAlreadyExists,
 )
 from paasng.accessories.servicehub.manager import mixed_service_mgr
-from paasng.accessories.servicehub.models import ServiceSetGroupByName
 from paasng.accessories.servicehub.remote.manager import (
     RemoteServiceInstanceMgr,
     RemoteServiceMgr,
@@ -49,7 +48,6 @@ from paasng.accessories.servicehub.remote.store import get_remote_store
 from paasng.accessories.servicehub.services import ServiceObj
 from paasng.accessories.servicehub.sharing import ServiceSharingManager, SharingReferencesManager
 from paasng.accessories.services.models import ServiceCategory
-from paasng.core.region.models import get_all_regions
 from paasng.infras.accounts.permissions.application import app_action_required, application_perm_class
 from paasng.infras.accounts.permissions.constants import SiteAction
 from paasng.infras.accounts.permissions.global_site import site_perm_class
@@ -500,19 +498,11 @@ class ServiceSetViewSet(viewsets.ViewSet):
         """
         # 保证 category 存在
         category = get_object_or_404(ServiceCategory, pk=category_id)
-
-        service_sets: Dict[str, ServiceSetGroupByName] = {}
-
         services: List[ServiceObj] = list(mixed_service_mgr.list_by_category(category_id=category.id))
-        for service in services:
-            service_set = service_sets.setdefault(service.name, ServiceSetGroupByName.from_service(service))
-            # 初始化 ServiceSet
-            service_set.services.append(service)
-
         return Response(
             {
-                "count": len(service_sets),
-                "results": slzs.ServiceSetGroupByNameSLZ(service_sets.values(), many=True).data,
+                "count": len(services),
+                "results": slzs.ServiceWithInstsSLZ(services, many=True).data,
             }
         )
 
@@ -523,39 +513,27 @@ class ServiceSetViewSet(viewsets.ViewSet):
         """
         # 查询用户具有权限的应用id列表
         application_ids = list(UserApplicationFilter(request.user).filter().values_list("id", flat=True))
-        all_regions = get_all_regions().keys()
 
         serializer = slzs.ServiceAttachmentQuerySLZ(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         param = serializer.data
 
-        service_set = None
-
-        for region in all_regions:
-            try:
-                service = mixed_service_mgr.find_by_name(name=service_name)
-                if not service_set:
-                    service_set = ServiceSetGroupByName.from_service(service)
-
-                # 初始化 service_set
-                service_set.services.append(service)
-                service_set.add_enabled_region(region)
-            except ServiceObjNotFound:
-                continue
-
-        if not service_set:
+        try:
+            service = mixed_service_mgr.find_by_name(name=service_name)
+        except ServiceObjNotFound:
             raise Http404(f"{service_name} not found")
 
         # 查询与 Services 绑定的 Module
-        qs = mixed_service_mgr.get_provisioned_queryset_by_services(
-            service_set.services, application_ids=application_ids
-        ).order_by(param["order_by"])
+        qs = mixed_service_mgr.get_provisioned_queryset(service, application_ids=application_ids).order_by(
+            param["order_by"]
+        )
 
+        instances = []
         page = self.paginator.paginate_queryset(qs, self.request, view=self)
         # TODO: 查询结果里面同一个应用如果有多个 Module，就会在结果集中出现多次。应该升级为同时返回应用
         # 与模块信息，前端也需要同时升级。
         for obj in page:
-            service_set.instances.append(
+            instances.append(
                 {
                     "id": obj.pk,
                     "application": obj.module.application,
@@ -566,7 +544,8 @@ class ServiceSetViewSet(viewsets.ViewSet):
                     "region": obj.module.region,
                 }
             )
-        return self.paginator.get_paginated_response(slzs.ServiceSetGroupByNameSLZ(service_set).data)
+        service.instances = instances  # type: ignore
+        return self.paginator.get_paginated_response(slzs.ServiceWithInstsSLZ(service).data)
 
 
 class ServicePlanViewSet(viewsets.ViewSet):
