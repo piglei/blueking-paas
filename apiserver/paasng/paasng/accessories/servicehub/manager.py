@@ -165,7 +165,11 @@ class MixedServiceMgr:
         plan_id: str | None = None,
         env_plan_id_map: Dict[str, str] | None = None,
     ) -> str:
-        """Create bind relationship for given module and service object."""
+        """Create bind relationship for given module and service object.
+
+        Use this method when the user can manually select a plan to bind, if this
+        condition is not met, use `bind_service_use_first_plan` instead.
+        """
         DuplicatedBindingValidator(module, ServiceBindingType.NORMAL).validate(service)
         return _proxied_svc_dispatcher("bind_service")(
             self, service, module, plan_id=plan_id, env_plan_id_map=env_plan_id_map
