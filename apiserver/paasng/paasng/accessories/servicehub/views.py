@@ -469,7 +469,7 @@ class ServiceViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
     def _gen_service_obj_allocations(module: Module, services: List[ServiceObj]) -> Dict[str, Any]:
         """生成服务对象分配信息"""
         svc_allocation_map: Dict[str, Dict[str, Any]] = {
-            svc.uuid: {"service": svc, "provision_infos": {}} for svc in services
+            svc.uuid: {"service": svc, "provision_infos": {}, "plans": {}} for svc in services
         }
         for env in module.get_envs():
             rels = mixed_service_mgr.list_all_rels(env.engine_app)
@@ -481,6 +481,7 @@ class ServiceViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
                 alloc = svc_allocation_map[svc.uuid]
                 # 补充实例分配信息
                 alloc["provision_infos"][env.environment] = rel.is_provisioned()
+                alloc["plans"][env.environment] = rel.get_plan()
         return svc_allocation_map
 
 

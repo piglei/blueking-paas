@@ -199,11 +199,24 @@ class ProvisionInfoSLZ(serializers.Serializer):
     prod = serializers.BooleanField(help_text="是否已配置实例(生产环境)", default=False)
 
 
+class PlanForDisplaySLZ(serializers.Serializer):
+    """用于简单展示的 Plan 信息"""
+
+    name = serializers.CharField(help_text="方案名称")
+    description = serializers.CharField(help_text="方案描述")
+
+
+class BoundPlansSLZ(serializers.Serializer):
+    stag = PlanForDisplaySLZ(help_text="预发布环境方案信息", default=None)
+    prod = PlanForDisplaySLZ(help_text="生产环境方案信息", default=None)
+
+
 class BoundServiceInfoSLZ(serializers.Serializer):
     """Serializer for representing bound service info"""
 
     service = ServiceMinimalSLZ(help_text="增强服务信息")
     provision_infos = ProvisionInfoSLZ(help_text="增强服务实例分配信息")
+    plans = BoundPlansSLZ(help_text="增强服务方案信息")
     ref_modules = serializers.ListField(help_text="共享当前增强服务的模块", allow_null=True, child=MinimalModuleSLZ())
 
 
