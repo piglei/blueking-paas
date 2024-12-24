@@ -552,17 +552,6 @@ class ServiceSetViewSet(viewsets.ViewSet):
         return self.paginator.get_paginated_response(slzs.ServiceWithInstsSLZ(service).data)
 
 
-class ServicePlanViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
-
-    @swagger_auto_schema(tags=["增强服务"])
-    def retrieve_specifications(self, request, service_id, region):
-        """[本接口已废弃] 获取一个增强服务的规格组合"""
-        # 本接口已废弃，服务绑定不再使用 specs
-        # TODO：删除此接口
-        return Response({})
-
-
 class ServiceSharingViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
     """与共享增强服务有关的接口"""
 

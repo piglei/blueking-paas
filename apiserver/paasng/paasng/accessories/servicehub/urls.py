@@ -47,12 +47,6 @@ urlpatterns = [
         views.ServiceViewSet.as_view({"get": "list_related_apps"}),
         name="api.services.list_application",
     ),
-    # TODO: the specs API is deprecated, use the new possible plans API instead
-    re_path(
-        r"^api/services/%s/regions/%s/specs$" % (SERVICE_UUID, REGION),
-        views.ServicePlanViewSet.as_view({"get": "retrieve_specifications"}),
-        name="api.services.get_specifications",
-    ),
     re_path(
         f"^api/services/categories/{CATEGORY_ID}/$",
         views.ServiceSetViewSet.as_view({"get": "list_by_category"}),
