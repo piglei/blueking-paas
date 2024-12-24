@@ -199,38 +199,6 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
             raise error_codes.CANNOT_READ_INSTANCE_INFO.f(_("无法获取到有效的配置信息."))
         return Response(data=AddonCredentialsSLZ({"credentials": credentials}).data)
 
-    # 下一个大版本移除该接口
-    @swagger_auto_schema(tags=["SYSTEMAPI"], deprecated=True)
-    @site_perm_required(SiteAction.SYSAPI_READ_SERVICES)
-    def provision_service(self, request, code, module_name, environment, service_name):
-        """分配增强服务实例"""
-        application = get_object_or_404(Application, code=code)
-        module = application.get_module(module_name)
-        engine_app = application.get_engine_app(environment, module_name=module_name)
-
-        try:
-            svc = mixed_service_mgr.find_by_name(name=service_name)
-        except ServiceObjNotFound:
-            raise error_codes.CANNOT_PROVISION_INSTANCE.f(f"addon named '{service_name}' not found")
-
-        try:
-            mixed_service_mgr.get_module_rel(service_id=svc.uuid, module_id=module.id)
-        except SvcAttachmentDoesNotExist:
-            # 如果未启用增强服务, 则静默启用
-            try:
-                mixed_service_mgr.bind_service(svc, module)
-            except Exception as e:
-                logger.exception("bind service %s to module %s error.", svc.uuid, module.name)
-                raise error_codes.CANNOT_BIND_SERVICE.f(str(e))
-
-        # 如果未分配增强服务实例, 则进行分配
-        rel = next(mixed_service_mgr.list_unprovisioned_rels(engine_app, service=svc), None)
-        if not rel:
-            return Response(data={"service_id": svc.uuid}, status=status.HTTP_200_OK)
-
-        rel.provision()
-        return Response(data={"service_id": svc.uuid}, status=status.HTTP_200_OK)
-
     @swagger_auto_schema(tags=["SYSTEMAPI"])
     @site_perm_required(SiteAction.SYSAPI_READ_SERVICES)
     def list_services(self, request, code, module_name, environment):
@@ -240,23 +208,6 @@ class SysAddonsAPIViewSet(viewsets.ViewSet):
 
         service_info = ServicesInfo.get_detail(engine_app)["services_info"]
         return Response(data=service_info)
-
-    # 下一个大版本移除该接口
-    @swagger_auto_schema(tags=["SYSTEMAPI"], deprecated=True)
-    @site_perm_required(SiteAction.SYSAPI_READ_SERVICES)
-    def retrieve_specs_by_uuid(self, request, code, module_name, service_id):
-        """获取应用已绑定的服务规格.
-        接口实现逻辑参考 paasng.accessories.servicehub.views.ModuleServicesViewSet.retrieve_specs
-        """
-        application = get_object_or_404(Application, code=code)
-        module = application.get_module(module_name)
-        service = mixed_service_mgr.get_or_404(service_id)
-
-        # 如果模块与增强服务之间没有绑定关系，直接返回 404 状态码
-        if not mixed_service_mgr.module_is_bound_with(service, module):
-            raise Http404
-        # 待删除，目前不提供任何 specs 相关的内容
-        return Response({"results": {}})
 
 
 class LessCodeSystemAPIViewSet(viewsets.ViewSet):
@@ -288,7 +239,7 @@ class LessCodeSystemAPIViewSet(viewsets.ViewSet):
         try:
             mixed_service_mgr.get_module_rel(service_id=svc.uuid, module_id=module.id)
         except SvcAttachmentDoesNotExist:
-            mixed_service_mgr.bind_service(service=svc, module=module)
+            mixed_service_mgr.bind_service_use_first_plan(service=svc, module=module)
         return Response()
 
     def get_db_service(self, application):

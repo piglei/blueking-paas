@@ -122,14 +122,17 @@ class ModuleServicesViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
         serializer.is_valid(raise_exception=True)
 
         data = serializer.data
-        # TODO: 增强服务绑定逻辑已经优化，删除原本接收的 specs 参数，转而接收可能得 plan_id
-        # 或 env_plan_id_map 参数
         application = self._get_application_by_code(data["code"])
         service_obj = self.get_service(data["service_id"], application)
         module = application.get_module(data.get("module_name", None))
 
         try:
-            rel_pk = mixed_service_mgr.bind_service(service_obj, module)
+            rel_pk = mixed_service_mgr.bind_service(
+                service_obj,
+                module,
+                plan_id=data["plan_id"],
+                env_plan_id_map=data["env_plan_id_map"],
+            )
         except BindServicePlanError as e:
             logger.warning("No plans can be found for service %s, environment: %s.", service_obj.uuid, str(e))
             raise error_codes.CANNOT_BIND_SERVICE.f(_("获取可用服务方案失败"))
@@ -425,7 +428,7 @@ class ServiceViewSet(viewsets.ViewSet, ApplicationCodeInPathMixin):
         shared_services = [info.service for info in shared_infos]
         bound_services = list(mixed_service_mgr.list_binded(module))
 
-        services = list(mixed_service_mgr.list())
+        services = list(mixed_service_mgr.list_visible())
         unbound_services = []
         for svc in services:
             if svc in bound_services or svc in shared_services:

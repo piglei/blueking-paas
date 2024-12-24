@@ -17,7 +17,6 @@
 
 
 import pytest
-from django.conf import settings
 from django_dynamic_fixture import G
 
 from paas_wl.infras.cluster.models import Cluster
@@ -31,11 +30,9 @@ from paasng.accessories.servicehub.binding_policy.selector import (
 from paasng.accessories.servicehub.constants import PrecedencePolicyCondType
 from paasng.accessories.servicehub.exceptions import MultiplePlanFoundError, NoPlanFoundError
 from paasng.accessories.servicehub.manager import mixed_plan_mgr, mixed_service_mgr
-from paasng.accessories.services.models import Plan, Service, ServiceCategory
 from paasng.platform.engine.constants import AppEnvName
 from tests.api.test_cnative_migration import get_random_string
 from tests.paasng.accessories.servicehub import data_mocks
-from tests.utils.helpers import generate_random_string
 
 pytestmark = [
     pytest.mark.django_db(databases=["default", "workloads"]),
@@ -43,32 +40,12 @@ pytestmark = [
 ]
 
 
-@pytest.fixture()
-def local_service():
-    service = G(
-        Service, name="mysql", category=G(ServiceCategory), region=settings.DEFAULT_REGION_NAME, logo_b64="dummy"
-    )
-    # Create some plans
-    G(Plan, name=generate_random_string(), service=service)
-    G(Plan, name=generate_random_string(), service=service)
-    return mixed_service_mgr.get(service.uuid)
-
-
+# Only test remote service object, no need to test local because servicehub/test_manager.py::TestMixedMgrBindService
+# already covered the local service object.
 @pytest.fixture()
 @pytest.mark.usefixture("_faked_remote_services")
-def remote_service(_faked_remote_services):
+def service_obj(_faked_remote_services):
     return mixed_service_mgr.get(data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"])
-
-
-@pytest.fixture(params=["local", "remote"])
-def service_obj(request, local_service, remote_service):
-    """Service object for testing, this fixture will yield both a remote and a local service"""
-    if request.param == "remote":
-        return request.getfixturevalue("remote_service")
-    elif request.param in "local":
-        return request.getfixturevalue("local_service")
-    else:
-        raise ValueError("Invalid type_ parameter")
 
 
 @pytest.fixture

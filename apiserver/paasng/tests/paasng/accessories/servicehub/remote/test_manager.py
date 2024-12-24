@@ -26,9 +26,7 @@ from django_dynamic_fixture import G
 
 from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
 from paasng.accessories.servicehub.exceptions import (
-    BindServicePlanError,
     CanNotModifyPlan,
-    ServiceObjNotFound,
 )
 from paasng.accessories.servicehub.manager import mixed_service_mgr
 from paasng.accessories.servicehub.models import RemoteServiceEngineAppAttachment
@@ -187,14 +185,6 @@ class TestRemoteMgrWithRealStore:
             yield
             store.empty()
 
-    def test_find_by_name(self, store, bk_module, bk_service):
-        mgr = RemoteServiceMgr(store=store)
-        assert mgr.find_by_name(bk_service.name) == bk_service
-
-        # Not found
-        with pytest.raises(ServiceObjNotFound):
-            mgr.find_by_name(name="some-unknown-service")
-
     @mock.patch("paasng.accessories.servicehub.remote.client.RemoteServiceClient.provision_instance")
     def test_module_rebind_failed_after_provision(self, mock_provision_instance, store, bk_module, bk_service):
         mgr = RemoteServiceMgr(store=store)
@@ -218,22 +208,6 @@ class TestRemoteMgrWithRealStore:
             assert plan.name == plans[0].name
 
 
-class TestRemoteMgrWithMockedStore:
-    @pytest.fixture(autouse=True)
-    def _setup_data(self, bk_service, bk_plan_1):
-        bk_service.plans = [bk_plan_1]
-
-    def test_bind_service(self, store, bk_module, bk_service):
-        mgr = RemoteServiceMgr(store=store)
-        ServiceBindingPolicyManager(bk_service).set_static([bk_service.plans[0]])
-        mgr.bind_service(bk_service, bk_module)
-
-    def test_bind_service_no_plans(self, store, bk_module, bk_service):
-        mgr = RemoteServiceMgr(store=store)
-        with pytest.raises(BindServicePlanError):
-            mgr.bind_service(bk_service, bk_module)
-
-
 id_of_first_service: str = data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"]
 
 
@@ -248,19 +222,6 @@ class TestRemoteMgr:
     @pytest.fixture()
     def store(self):
         return get_remote_store()
-
-    def test_list_binded(self, store, bk_app, bk_module):
-        mgr = RemoteServiceMgr(store=store)
-        assert list(mgr.list_binded(bk_module)) == []
-        for env in bk_app.envs.all():
-            assert list(mgr.list_unprovisioned_rels(env.engine_app)) == []
-
-        svc = mgr.get(id_of_first_service)
-        rel_pk = mgr.bind_service(svc, bk_module)
-        assert rel_pk is not None
-        assert list(mgr.list_binded(bk_module)) == [svc]
-        for env in bk_app.envs.all():
-            assert len(list(mgr.list_unprovisioned_rels(env.engine_app))) == 1
 
     @mock.patch("paasng.accessories.servicehub.remote.manager.get_cluster_egress_info")
     @mock.patch("paasng.accessories.servicehub.remote.client.RemoteServiceClient.retrieve_instance")

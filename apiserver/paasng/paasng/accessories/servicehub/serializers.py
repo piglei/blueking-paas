@@ -145,6 +145,9 @@ class CreateAttachmentSLZ(serializers.Serializer):
     module_name = serializers.CharField(required=False)
     code = serializers.CharField()
 
+    plan_id = serializers.CharField(help_text="手动指定的方案 ID", default=None)
+    env_plan_id_map = serializers.DictField(help_text="手动指定的分环境方案 ID 字典", default=None)
+
 
 class ServiceInstanceSLZ(serializers.Serializer):
     """增强服务实例-序列化器"""

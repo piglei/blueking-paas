@@ -27,7 +27,7 @@ from django_dynamic_fixture import G
 
 from paasng.accessories.servicehub.binding_policy.manager import ServiceBindingPolicyManager
 from paasng.accessories.servicehub.constants import Category
-from paasng.accessories.servicehub.exceptions import ServiceObjNotFound
+from paasng.accessories.servicehub.exceptions import BindServicePlanError, ServiceObjNotFound
 from paasng.accessories.servicehub.local import LocalServiceMgr, LocalServiceObj
 from paasng.accessories.servicehub.manager import mixed_service_mgr
 from paasng.accessories.servicehub.models import ServiceEngineAppAttachment
@@ -35,12 +35,13 @@ from paasng.accessories.servicehub.remote import RemoteServiceObj
 from paasng.accessories.servicehub.services import ServiceInstanceObj
 from paasng.accessories.services.models import Plan, Service, ServiceCategory, ServiceInstance
 from tests.paasng.accessories.servicehub import data_mocks
+from tests.utils.helpers import generate_random_string
 
 pytestmark = [pytest.mark.django_db, pytest.mark.xdist_group(name="remote-services")]
 
 
 @pytest.mark.usefixtures("_faked_remote_services")
-class TestMixedMgr:
+class TestMixedMgrGetAndList:
     def test_list_by_category(self):
         services = list(mixed_service_mgr.list_by_category(category_id=Category.DATA_STORAGE))
         assert len(services) == 1
@@ -117,7 +118,112 @@ class TestMixedMgr:
         assert envs == {"a": 1, "b": 2, "c": 3}
 
 
-class TestLocalMgr:
+class TestMixedMgrBindService:
+    """All test cases in this class test both local and remote services by using
+    the parametrized fixture `service_obj`."""
+
+    @pytest.fixture()
+    def local_service(self):
+        service = G(
+            Service, name="mysql", category=G(ServiceCategory), region=settings.DEFAULT_REGION_NAME, logo_b64="dummy"
+        )
+        # Create some plans
+        G(Plan, name=generate_random_string(), service=service)
+        G(Plan, name=generate_random_string(), service=service)
+        return mixed_service_mgr.get(service.uuid)
+
+    @pytest.fixture()
+    @pytest.mark.usefixture("_faked_remote_services")
+    def remote_service(self, _faked_remote_services):
+        return mixed_service_mgr.get(data_mocks.OBJ_STORE_REMOTE_SERVICES_JSON[0]["uuid"])
+
+    @pytest.fixture(params=["local", "remote"])
+    def service_obj(self, request, local_service, remote_service):
+        """Service object for testing, this fixture will yield both a remote and a local service"""
+        if request.param == "remote":
+            return request.getfixturevalue("remote_service")
+        elif request.param in "local":
+            return request.getfixturevalue("local_service")
+        else:
+            raise ValueError("Invalid type_ parameter")
+
+    @pytest.fixture
+    def plan1(self, service_obj):
+        return service_obj.get_plans()[0]
+
+    @pytest.fixture
+    def plan2(self, service_obj):
+        return service_obj.get_plans()[1]
+
+    def test_no_plans(self, bk_module, service_obj, plan1):
+        with pytest.raises(BindServicePlanError):
+            mixed_service_mgr.bind_service(service_obj, bk_module)
+
+    def test_static_single(self, bk_module, service_obj, plan1):
+        ServiceBindingPolicyManager(service_obj).set_static([plan1])
+        rel_pk = mixed_service_mgr.bind_service(service_obj, bk_module)
+        assert rel_pk is not None
+
+    def test_static_multi(self, bk_module, service_obj, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_static([plan1, plan2])
+        with pytest.raises(BindServicePlanError):
+            mixed_service_mgr.bind_service(service_obj, bk_module)
+
+    def test_valid_plan_id(self, service_obj, bk_module, plan1):
+        ServiceBindingPolicyManager(service_obj).set_static([plan1])
+        rel_pk = mixed_service_mgr.bind_service(service_obj, bk_module, plan_id=plan1.uuid)
+        assert rel_pk is not None
+
+    def test_invalid_plan_id(self, service_obj, bk_module, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_static([plan1])
+        with pytest.raises(BindServicePlanError):
+            mixed_service_mgr.bind_service(service_obj, bk_module, plan_id=plan2.uuid)
+
+    def test_valid_env_plan_id_map(self, service_obj, bk_module, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_env_specific(env_plans=[("stag", [plan1]), ("prod", [plan2])])
+        rel_pk = mixed_service_mgr.bind_service(
+            service_obj, bk_module, env_plan_id_map={"stag": plan1.uuid, "prod": plan2.uuid}
+        )
+        assert rel_pk is not None
+
+    def test_invalid_env_plan_id_map(self, service_obj, bk_module, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_env_specific(env_plans=[("stag", [plan1]), ("prod", [plan1])])
+        with pytest.raises(BindServicePlanError):
+            mixed_service_mgr.bind_service(
+                service_obj, bk_module, env_plan_id_map={"stag": plan1.uuid, "prod": plan2.uuid}
+            )
+
+    # Tests for bind_use_first_plan start
+    def test_use_first_plan_no_plans(self, bk_module, service_obj, plan1):
+        with pytest.raises(BindServicePlanError):
+            mixed_service_mgr.bind_service_use_first_plan(service_obj, bk_module)
+
+    def test_use_first_plan_ok(self, bk_module, service_obj, bk_stag_env, plan1, plan2):
+        ServiceBindingPolicyManager(service_obj).set_static([plan2, plan1])
+        rel_pk = mixed_service_mgr.bind_service_use_first_plan(service_obj, bk_module)
+        assert rel_pk is not None
+
+        # Check the bound plan
+        rels = mixed_service_mgr.list_all_rels(bk_stag_env.engine_app, service_obj.uuid)
+        assert all(rel.get_plan().name == plan2.name for rel in rels)
+
+    # Tests for list_binded start
+
+    def test_list_binded(self, service_obj, bk_app, bk_module, plan1):
+        assert list(mixed_service_mgr.list_binded(bk_module)) == []
+        for env in bk_app.envs.all():
+            assert list(mixed_service_mgr.list_unprovisioned_rels(env.engine_app)) == []
+
+        ServiceBindingPolicyManager(service_obj).set_static([plan1])
+        rel_pk = mixed_service_mgr.bind_service(service_obj, bk_module)
+
+        assert rel_pk is not None
+        assert list(mixed_service_mgr.list_binded(bk_module)) == [service_obj]
+        for env in bk_app.envs.all():
+            assert len(list(mixed_service_mgr.list_unprovisioned_rels(env.engine_app))) == 1
+
+
+class TestLocalMgrProvisionAndInstance:
     @pytest.fixture()
     def svc(self, bk_app):
         """Create a local service object."""
@@ -158,25 +264,6 @@ class TestLocalMgr:
             )
 
         return _create
-
-    def test_bind_service(self, svc, bk_module):
-        mgr = LocalServiceMgr()
-        service = mgr.get(svc.uuid)
-        rel_pk = mgr.bind_service(service, bk_module)
-        assert rel_pk is not None
-
-    def test_list_binded(self, svc, bk_app, bk_module):
-        mgr = LocalServiceMgr()
-        service = mgr.get(svc.uuid)
-        assert list(mgr.list_binded(bk_module)) == []
-        for env in bk_app.envs.all():
-            assert list(mgr.list_unprovisioned_rels(env.engine_app)) == []
-
-        rel_pk = mgr.bind_service(service, bk_module)
-        assert rel_pk is not None
-        assert list(mgr.list_binded(bk_module)) == [service]
-        for env in bk_app.envs.all():
-            assert len(list(mgr.list_unprovisioned_rels(env.engine_app))) == 1
 
     @mock.patch("paasng.accessories.services.models.Service.create_service_instance_by_plan")
     def test_provision(self, mocked_method, instance_factory, svc, bk_app, bk_module):
@@ -225,16 +312,6 @@ class TestLocalMgr:
                 assert instance.get_hidden_credentials() == {}
                 assert instance.should_remove_fields == ["MYSQL_PASSWORD"]
             break
-
-    def test_find_by_name_not_found(self, bk_module):
-        mgr = LocalServiceMgr()
-        with pytest.raises(ServiceObjNotFound):
-            mgr.find_by_name(name="foo_name")
-
-    def test_find_by_name_normal(self, bk_module):
-        mgr = LocalServiceMgr()
-        service = mgr.find_by_name(name="mysql")
-        assert service is not None
 
     def test_module_is_bound_with(self, svc, bk_module):
         mgr = LocalServiceMgr()

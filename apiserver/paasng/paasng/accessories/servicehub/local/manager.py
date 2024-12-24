@@ -32,7 +32,7 @@ from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext_lazy as _
 
 from paasng.accessories.servicehub import constants
-from paasng.accessories.servicehub.binding_policy.selector import get_plan_by_env
+from paasng.accessories.servicehub.binding_policy.selector import PlanSelector, get_plan_by_env
 from paasng.accessories.servicehub.exceptions import (
     BindServicePlanError,
     CanNotModifyPlan,
@@ -279,6 +279,11 @@ class LocalServiceMgr(BaseServiceMgr):
         db_service = Service.objects.get(pk=service.uuid)
         return LocalServiceBinder(LocalServiceObj.from_db_object(db_service)).bind(module, plan_id, env_plan_id_map).pk
 
+    def bind_service_use_first_plan(self, service: ServiceObj, module: Module) -> str:
+        """Bind a service to module, use the first plan when multiple plans are available"""
+        db_service = Service.objects.get(pk=service.uuid)
+        return LocalServiceBinder(LocalServiceObj.from_db_object(db_service)).bind_use_first_plan(module).pk
+
     def bind_service_partial(self, service: ServiceObj, module: Module) -> str:
         """Bind a service to module, without binding to engine app"""
         db_service = Service.objects.get(pk=service.uuid)
@@ -483,6 +488,28 @@ class LocalServiceBinder:
                 raise BindServicePlanError(str(e))
 
             plan = cast(LocalPlanObj, plan)
+            self._bind_for_env(env, plan)
+        return svc_module_attachment
+
+    @atomic()
+    def bind_use_first_plan(self, module: Module):
+        """Create the binding relationship in local database. Use the first plan
+        if multiple plans are available.
+
+        :raises BindServicePlanError: When no appropriate plans can be found.
+        """
+        svc_module_attachment, _ = ServiceModuleAttachment.objects.get_or_create(
+            service=self.service.db_object, module=module
+        )
+
+        # bind plans to each environment
+        for env in module.envs.all():
+            plans = PlanSelector().list(self.service, env)
+            if not plans:
+                raise BindServicePlanError("no plans found")
+
+            # Use the first plan
+            plan = cast(LocalPlanObj, plans[0])
             self._bind_for_env(env, plan)
         return svc_module_attachment
 

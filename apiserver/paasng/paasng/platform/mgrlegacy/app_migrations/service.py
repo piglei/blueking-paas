@@ -59,7 +59,7 @@ class LegacyBaseServiceMigration(BaseMigration):
                 raise RuntimeError(f"service {service_name} is not local service, will abort")
 
         module = self.context.app.get_default_module()
-        mixed_service_mgr.bind_service(service_obj, module)
+        mixed_service_mgr.bind_service_use_first_plan(service_obj, module)
 
     def _get_environment_attachment(self, environment: str):
         try:
@@ -202,7 +202,7 @@ class BaseServiceMigration(BaseMigration):
                 service_obj=service_obj.name, module_name=module.name
             )
         )
-        self.service_mgr.bind_service(service_obj, module=module)
+        self.service_mgr.bind_service_use_first_plan(service_obj, module=module)
 
     def migrate_service_instance(self, environment: AppEnvName, credentials: Dict, config: Optional[Dict] = None):
         """迁移增强服务实例信息至远程增强服务"""

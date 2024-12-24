@@ -130,8 +130,8 @@ class PlanSelector:
     @staticmethod
     def plan_ids_to_objs(service: ServiceObj, plan_ids: List[str]) -> List[PlanObj]:
         """Convert the plan ids to plan objects"""
-        all_plans = service.get_plans()
-        return [p for p in all_plans if p.uuid in plan_ids]
+        index = {p.uuid: p for p in service.get_plans()}
+        return [index[plan_id] for plan_id in plan_ids]
 
 
 class PossiblePlansResultType(StrEnum):

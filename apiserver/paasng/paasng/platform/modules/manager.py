@@ -527,14 +527,16 @@ class DefaultServicesBinder:
 
     def _bind(self, services: PresetServiceSpecs):
         """Bind current module with given services"""
-        for service_name, config in services.items():
+        # The value of `services` contains specs, the specs used to be a parameter for
+        # `bind_service` but now it's not used anymore, so we just ignore it.
+        for service_name in services:
             try:
                 service_obj = mixed_service_mgr.find_by_name(service_name)
             except ServiceObjNotFound:
                 logger.exception("应用<%s>获取预设增强服务<%s>失败", self.application.code, service_name)
                 continue
 
-            mixed_service_mgr.bind_service(service_obj, self.module, config.get("specs"))
+            mixed_service_mgr.bind_service_use_first_plan(service_obj, self.module)
 
 
 def make_engine_app_name(module: Module, app_code: str, env: str) -> str:

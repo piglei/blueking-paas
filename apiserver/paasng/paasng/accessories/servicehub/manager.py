@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 def _fetch_service_categories() -> List[ServiceCategory]:
     """Fetch service categories by region."""
-    category_ids = {obj.category_id for obj in mixed_service_mgr.list()}
+    category_ids = {obj.category_id for obj in mixed_service_mgr.list_visible()}
     categories = ServiceCategory.objects.filter(pk__in=category_ids).order_by("-sort_priority")
     return list(categories)
 
@@ -165,11 +165,20 @@ class MixedServiceMgr:
         plan_id: str | None = None,
         env_plan_id_map: Dict[str, str] | None = None,
     ) -> str:
-        """Create bind relationship for given module and service object"""
+        """Create bind relationship for given module and service object."""
         DuplicatedBindingValidator(module, ServiceBindingType.NORMAL).validate(service)
         return _proxied_svc_dispatcher("bind_service")(
             self, service, module, plan_id=plan_id, env_plan_id_map=env_plan_id_map
         )
+
+    def bind_service_use_first_plan(self, service: ServiceObj, module: Module) -> str:
+        """Create bind relationship for given module and service object.
+
+        The difference between this method and `bind_service` is that this method will
+        use the first plan when multiple plans are available instead of raising an exception.
+        """
+        DuplicatedBindingValidator(module, ServiceBindingType.NORMAL).validate(service)
+        return _proxied_svc_dispatcher("bind_service_use_first_plan")(self, service, module)
 
     # Dispatch via service type start
 

@@ -33,7 +33,7 @@ from django.utils.translation import gettext_lazy as _
 from paas_wl.infras.cluster.shim import EnvClusterService
 from paas_wl.workloads.networking.egress.shim import get_cluster_egress_info
 from paasng.accessories.servicehub import constants, exceptions
-from paasng.accessories.servicehub.binding_policy.selector import get_plan_by_env
+from paasng.accessories.servicehub.binding_policy.selector import PlanSelector, get_plan_by_env
 from paasng.accessories.servicehub.exceptions import BindServicePlanError
 from paasng.accessories.servicehub.models import RemoteServiceEngineAppAttachment, RemoteServiceModuleAttachment
 from paasng.accessories.servicehub.remote.client import RemoteServiceClient
@@ -548,6 +548,11 @@ class RemoteServiceMgr(BaseServiceMgr):
         binder = RemoteServiceBinder(service)
         return binder.bind(module, plan_id, env_plan_id_map).pk
 
+    def bind_service_use_first_plan(self, service: ServiceObj, module: Module) -> str:
+        """Bind a service to module, use the first plan when multiple plans are available"""
+        binder = RemoteServiceBinder(service)
+        return binder.bind_use_first_plan(module).pk
+
     def bind_service_partial(self, service: ServiceObj, module: Module) -> str:
         """Bind a service to module, without binding to engine app"""
         binder = RemoteServiceBinder(service)
@@ -721,6 +726,29 @@ class RemoteServiceBinder:
                 raise BindServicePlanError(str(e))
 
             plan = cast(RemotePlanObj, plan)
+            self._bind_for_env(env, plan)
+        return svc_module_attachment
+
+    @atomic()
+    def bind_use_first_plan(self, module: Module):
+        """Create the binding relationship in local database. Use the first plan
+        if multiple plans are available.
+
+        :raises BindServicePlanError: When no appropriate plans can be found.
+        """
+        svc_module_attachment, _ = RemoteServiceModuleAttachment.objects.get_or_create(
+            module=module,
+            service_id=self.service.uuid,
+        )
+
+        # bind plans to each environment
+        for env in module.envs.all():
+            plans = PlanSelector().list(self.service, env)
+            if not plans:
+                raise BindServicePlanError("no plans found")
+
+            # Use the first plan
+            plan = cast(RemotePlanObj, plans[0])
             self._bind_for_env(env, plan)
         return svc_module_attachment
 
