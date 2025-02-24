@@ -13,7 +13,7 @@ dependencies = [
   'apigw-manager (==3.0.2)',
   'bkstorages (==2.0.0)',
   'bleach (==3.3.0)',
-  'blue-krill (==2.0.7)',
+  "blue-krill (==2.1.0)",
   'bkapi-component-open (==1.1.0)',
   'boto (==2.49.0)',
   'boto3 (==1.33.13)',
@@ -102,9 +102,8 @@ dependencies = [
   'bk-audit (==1.2.3b0)',
 ]
 
-[[tool.poetry.source]]
-name = "tencent-mirror"
-url = "https://mirrors.tencent.com/pypi/simple/"
+[tool.poetry]
+package-mode = false
 
 [tool.poetry.group.dev.dependencies]
 filelock = "*"
