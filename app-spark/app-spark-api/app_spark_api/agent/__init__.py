@@ -14,8 +14,10 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Shared utilities for app-spark-api."""
+"""让 Agent 替用户干活的那一整块，分成上下两层：
 
-from app_spark_api.utils.attrs import cattrs_converter, structure_config, validate_non_empty_string
-
-__all__ = ["cattrs_converter", "structure_config", "validate_non_empty_string"]
+* :mod:`~app_spark_api.agent.conversations` 是领域层，也是唯一的 Django app：会话属于哪个
+  Project、编号是几、对外的 HTTP 接口长什么样。
+* :mod:`~app_spark_api.agent.runtime` 是设施层：Agent Runtime 在哪里跑、怎么把它拉起来、
+  怎么跟它说话。上层只认这一层给出的抽象，因此本机进程换成远程沙箱时，上层不必改。
+"""

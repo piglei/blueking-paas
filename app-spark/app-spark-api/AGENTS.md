@@ -23,3 +23,6 @@ You are in the ap-spark repo, helping implement features, fix bugs, and refactor
 
 * Run all tests: `uv run pytest --reuse-db -s --maxfail=1 tests/`
 * ALWAYS prefer specifying test files for efficiency
+* `tests/api/test_conversations.py` spawns real agent processes instead of mocking them, so it
+  needs the agent's virtualenv: run `cd ../agent && uv sync` first. Without it the tests skip
+  with a reason rather than failing.

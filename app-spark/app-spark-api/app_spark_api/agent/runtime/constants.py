@@ -14,8 +14,11 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Shared utilities for app-spark-api."""
+from enum import StrEnum
 
-from app_spark_api.utils.attrs import cattrs_converter, structure_config, validate_non_empty_string
 
-__all__ = ["cattrs_converter", "structure_config", "validate_non_empty_string"]
+class AgentRuntimeProviderType(StrEnum):
+    """How an Agent Runtime is obtained for a conversation."""
+
+    # 在本机 spawn 一个 agent 进程。开发与测试用，进程句柄只存在内存里。
+    LOCAL_PROCESS = "local_process"

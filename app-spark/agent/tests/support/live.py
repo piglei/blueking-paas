@@ -6,7 +6,11 @@ configured entirely through ``APP_SPARK_AGENT_*`` variables. Nothing here reache
 process it started -- every assertion a test makes travels over HTTP, and the state directory
 is only ever read through the endpoints that serve it.
 
-Every call narrates itself through :mod:`tests.e2e.console`, which makes ``-s`` worth passing.
+Nothing here is tied to a particular model: :mod:`tests.e2e` drives these against the real one,
+and :mod:`tests.live` drives them against ``fake:`` scenarios that cost nothing.
+
+Every call narrates itself through :mod:`tests.support.console`, which makes ``-s`` worth
+passing.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from uuid import uuid4
 import httpx
 
 from app_spark_agent import settings
-from tests.e2e import console
+from tests.support import console
 from tests.support.ag_ui import run_body
 
 ASGI_TARGET = "app_spark_agent.server.asgi:app"

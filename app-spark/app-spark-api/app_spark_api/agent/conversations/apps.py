@@ -14,8 +14,13 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Shared utilities for app-spark-api."""
+from django.apps import AppConfig
 
-from app_spark_api.utils.attrs import cattrs_converter, structure_config, validate_non_empty_string
 
-__all__ = ["cattrs_converter", "structure_config", "validate_non_empty_string"]
+class ConversationsConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "app_spark_api.agent.conversations"
+
+    def ready(self):
+        # 注册「建 Project 时一并备好会话计数器」的 receiver，取号路径依赖这行一定存在。
+        from app_spark_api.agent.conversations import signals  # noqa: F401

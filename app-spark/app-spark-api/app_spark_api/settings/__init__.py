@@ -86,6 +86,7 @@ INSTALLED_APPS = [
     "bkpaas_auth",
     "app_spark_api.infras.accounts.apps.AccountsConfig",
     "app_spark_api.core.projects.apps.ProjectsConfig",
+    "app_spark_api.agent.conversations.apps.ConversationsConfig",
     "app_spark_api.repository.storage.apps.StorageConfig",
 ]
 
@@ -238,6 +239,18 @@ BKAUTH_TOKEN_USER_INFO_ENDPOINT = settings.get("BKAUTH_TOKEN_USER_INFO_ENDPOINT"
 
 ## Project 源码使用蓝鲸制品库时的连接配置，仅基础配置，具体仓库名和 key 在各 Project 对应模型中
 BLOBSTORE_BKREPO_CONFIG = settings.get("BLOBSTORE_BKREPO_CONFIG")
+
+
+# --------
+# Agent Runtime 驱动相关配置
+# --------
+
+## 用什么方式为一个会话拉起 Agent Runtime，可选值见 agent.runtime.constants.AgentRuntimeProviderType，
+## 目前只有 local_process（在本机 spawn 一个 agent 进程，仅供开发与测试）
+AGENT_RUNTIME_PROVIDER = settings.get("AGENT_RUNTIME_PROVIDER", "local_process")
+
+## 上述驱动方式各自的配置，字段以对应的 config 类为准（local_process 见 LocalProcessConfig）
+AGENT_RUNTIME_PROVIDER_CONFIG = settings.get("AGENT_RUNTIME_PROVIDER_CONFIG", {})
 
 
 # Static files (CSS, JavaScript, Images)

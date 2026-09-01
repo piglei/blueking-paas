@@ -9,6 +9,7 @@
 - 改造为可以基于独立容器启动
 - 支持在沙箱环境中启动
 - 增加开发蓝鲸 SaaS 相关 SKILL
+- `RunGuard` 目前基于 asyncio 锁，只能保护单进程，后续应替换为文件锁
 
 ## 安装与启动
 
@@ -32,6 +33,19 @@ uv run uvicorn app_spark_agent.server.asgi:app --port 8765
 环境变量解析并校验（`.env` 文件也会自动读取），完整清单以该文件为准。其中 `WORKSPACE` 与
 `STATE_DIR` 没有默认值、真正建应用时才检查；其余项（模型、压缩策略、游标 limit 等）都有
 合理默认值。
+
+## 假模型
+
+`MODEL` 除了 `<provider>:<model>`，还接受 `fake:<scenario>`——一个不发起任何网络请求的确定性
+模型。它存在的理由是：外部控制面（app-spark-api）要做的是
+把 Runtime 当成真进程来集成，与其在控制面那边把整个 Agent mock 掉，不如让 Runtime 本身能被
+零成本地真正启动——这样跑的就是真进程、真 HTTP、真 SSE、真文件写入。
+
+```bash
+APP_SPARK_AGENT_MODEL=fake:write-file uv run uvicorn app_spark_agent.server.asgi:app --port 8765
+```
+
+目前支持的假模型场景详情可查看 `fake_model.py`。
 
 ## 会话状态
 
@@ -92,14 +106,18 @@ curl -N http://127.0.0.1:8765/runs \
 
 ### 单元测试
 
-普通测试不请求模型、不需要 API Key、也不需要起进程：
+默认的测试命令不请求真实模型、不需要 API Key：
 
 ```bash
 uv run pytest
 ```
 
-`tests/api/` 跑在假模型上完整覆盖 HTTP 接口的正确与错误分支；状态原语、Agent 组装、压缩、
-事件合并在 `tests/` 其余模块。
+`tests/api/` 跑在进程内注入的假模型上，完整覆盖 HTTP 接口的正确与错误分支；状态原语、Agent
+组装、压缩、事件合并在 `tests/` 其余模块。
+
+`tests/live/` 用 uvicorn 拉起**真实进程**，但模型是 `fake:` 场景，所以默认就跑。它覆盖
+的是进程内测试结构上够不到的那一段：Runtime 由 `create_app_from_settings()` 只凭环境变量装配
+起来——这正是任何外部控制面启动它的方式，而一个只能进程内注入的假模型对它们毫无用处。
 
 ### E2E 测试
 

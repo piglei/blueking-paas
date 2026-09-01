@@ -25,10 +25,17 @@ STATE_DIR = env.path("STATE_DIR", None)
 # -----------------------------------------------------------------------
 
 # 对话使用的模型，格式是 pydantic-ai 的 ``<provider>:<model>``。
+#
+# 另外支持 ``fake:<scenario>``：一个不发起任何网络请求的确定性假模型，供集成测试把 Runtime
+# 真正启动起来，场景清单见 ``fake_model.py``。
 MODEL = env.str("MODEL", "deepseek:deepseek-v4-flash", validate=Length(min=1))
 
 # 模型 API Key。留空时不会报错，而是退回 provider 自己的环境变量约定。
 API_KEY = env.str("API_KEY", None)
+
+# ``fake:slow`` 场景挂起的秒数。它存在的意义是让「run 正在进行中」成为一个能被外部观察到的
+# 稳定状态，从而可以真实地触发 Runtime 的 409，而不是靠 sleep 去猜时序。
+FAKE_DELAY_SECONDS = env.float("FAKE_DELAY_SECONDS", 2.0, validate=Range(min=0))
 
 # Agent 的系统提示词。它和 ``agent.py`` 里挂载的能力是配套的——提示词里提到的「file 工具」
 # 「shell 工具」「AGENTS.md」分别对应 FileSystem、Shell、RepoContext 三个能力。
