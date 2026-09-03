@@ -5,7 +5,7 @@
 
 ## TODO
 
-- 支持对 api 主控端回写持久化内容
+- 冷启动只恢复上下文、不恢复 workspace 源码（见「远程持久化」一节）
 - 改造为可以基于独立容器启动
 - 支持在沙箱环境中启动
 - 增加开发蓝鲸 SaaS 相关 SKILL
@@ -66,6 +66,38 @@ APP_SPARK_AGENT_MODEL=fake:write-file uv run uvicorn app_spark_agent.server.asgi
 - `SummarizingCompaction` 是一次不可重放的真实 LLM 调用，冷启动重建上下文的唯一来源是
   `context.json`，绝不能从 `log.jsonl` 拼出来。
 
+## 远程持久化
+
+配置了控制面地址之后，上面这三份文件不再是唯一副本：`app_spark_agent/replication/` 下的后台
+任务会把它们复制到控制面，状态目录退化成一个可以丢弃的本地缓冲。
+
+| 配置项 | 作用 |
+| --- | --- |
+| `CONTROL_PLANE_URL` | 已经带上会话前缀的完整地址。Runtime 因此不需要认识「会话」这个概念 |
+| `CONTROL_PLANE_TOKEN` | spawn 时注入的 token，只授权这一个会话 |
+| `PUSH_BATCH_SIZE` | 单次 ingest 调用最多带几条 |
+| `PUSH_RETRY_BACKOFF_SECONDS` | 一轮推送失败后等多久重试 |
+| `PUSH_FLUSH_TIMEOUT_SECONDS` | run 收尾时等控制面追上的上限 |
+
+两条规则值得单独记住：
+
+- **run 结束时有一道屏障**。`finish_response` 里先 `flush`、再释放 `run_guard`，所以「Runtime
+  空闲」就意味着「这一轮已经在控制面上」。flush 超时**不会让 run 失败**——数据还在本地文件
+  里、后台任务会继续重试，落后程度从 `/health` 的 `pushed_*` 能看出来。真正的残余风险是容器
+  在落后期间被回收。
+- **冷启动要播种 seq，否则会撞号**。全新 Runtime 的 `log.jsonl` 默认从 seq 1 开始，会撞上控制面
+  里已有的 1..N。所以 `PUT /context` 带 `?log_seq=40&ui_event_seq=55`，`AppendLog` 以此为
+  `base_seq`，第一条 append 变成 41。游标走 query 参数而不是 body，是因为 body 必须原样保持
+  `GET /context` 吐出来的那份文档。
+
+已知缺口，按严重程度排：
+
+- **workspace 源码不恢复**。冷启动后上下文里会引用一堆不存在的文件——Agent「记得」自己写过
+  `index.html`，但目录是空的。所以冷启动目前只在「继续讨论」层面成立，不在「继续编码」层面
+  成立。衔接点在控制面的 `ProjectSourceStorage`：注入 context 之前先把源码还原回去。
+- `AppendLog.has_run()` 的重放检测只覆盖当代文件，冷启动后旧的 run_id 不再会被拒绝。控制面每轮
+  都生成新 UUID，所以现实中碰不到。
+
 ## 发起会话
 
 `POST /runs` 接收 AG-UI 请求体，返回一段 SSE 事件流，里面全部是可以直接转发给前端的 AG-UI
@@ -96,9 +128,9 @@ curl -N http://127.0.0.1:8765/runs \
 
 ## 游标接口
 
-以下接口是提供给外部访问会话状态的通道：`/health` 报三份状态的当前游标与运行标志，
-`/log` 与 `/ui-events` 按游标增量读取两条日志，`/context` 导出当前上下文（也可向空 Runtime
-注入冷会话上下文）。
+以下接口是提供给外部访问会话状态的通道：`/health` 报三份状态的当前游标、运行标志，以及
+`pushed_*` 复制游标（配了控制面才有意义），`/log` 与 `/ui-events` 按游标增量读取两条日志，
+`/context` 导出当前上下文（也可向空 Runtime 注入冷会话上下文并播种 seq）。
 
 > 具体参数与返回结构以代码实现为准。
 
@@ -113,11 +145,14 @@ uv run pytest
 ```
 
 `tests/api/` 跑在进程内注入的假模型上，完整覆盖 HTTP 接口的正确与错误分支；状态原语、Agent
-组装、压缩、事件合并在 `tests/` 其余模块。
+组装、压缩、事件合并在 `tests/` 其余模块。`tests/replication/` 用 `httpx.MockTransport` 在进程
+内伪造控制面，但状态文件、游标、字节偏移全是真的——整套设计就架在「文件即 outbox」上。
 
 `tests/live/` 用 uvicorn 拉起**真实进程**，但模型是 `fake:` 场景，所以默认就跑。它覆盖
 的是进程内测试结构上够不到的那一段：Runtime 由 `create_app_from_settings()` 只凭环境变量装配
 起来——这正是任何外部控制面启动它的方式，而一个只能进程内注入的假模型对它们毫无用处。
+`test_replication.py` 是同一个道理：它在环回端口上跑一个假控制面，验证「跑完一轮 → 换一个状态
+目录全空的新进程 → 对话接着上一轮继续」，并且两代 Runtime 的 seq 拼成一条不重号的平坦序列。
 
 ### E2E 测试
 

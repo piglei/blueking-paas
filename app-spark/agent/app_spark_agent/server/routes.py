@@ -18,9 +18,11 @@ from app_spark_agent.server.runtime import ConversationRuntime
 from app_spark_agent.state import (
     AppendLog,
     AppendLogError,
+    Channel,
     ConversationContext,
     ConversationStateConflict,
     ConversationStateError,
+    CursorStateError,
 )
 from app_spark_agent.ui_events import record_ui_events
 
@@ -52,7 +54,12 @@ async def busy_conflict_handler(request: Request, exc: Exception) -> JSONRespons
 
 @router.get("/health")
 async def health(runtime: RuntimeDep) -> dict[str, object]:
-    """Report the conversation's identity and the cursor of every stream."""
+    """Report the conversation's identity, the cursor of every stream, and replication lag.
+
+    The ``pushed_*`` cursors are what tells the control plane whether this Runtime is safe to
+    discard. They read ``0`` for a Runtime with no control plane configured, where the question
+    does not apply.
+    """
     context = runtime.context_store.context
     return {
         "status": "ok",
@@ -62,6 +69,10 @@ async def health(runtime: RuntimeDep) -> dict[str, object]:
         "log_seq": runtime.transcript.last_seq,
         "ui_event_seq": runtime.ui_events.last_seq,
         "running": runtime.run_guard.busy,
+        "replicating": runtime.replicator is not None,
+        "pushed_log_seq": runtime.cursors.channel(Channel.MESSAGE).pushed_seq,
+        "pushed_ui_event_seq": runtime.cursors.channel(Channel.UI_EVENT).pushed_seq,
+        "pushed_context_version": runtime.cursors.pushed_context_version,
     }
 
 
@@ -96,8 +107,23 @@ async def read_context(runtime: RuntimeDep) -> JSONResponse:
 
 
 @router.put("/context")
-async def restore_context(request: Request, runtime: RuntimeDep) -> JSONResponse:
-    """Inject a cold context into an empty Runtime."""
+async def restore_context(
+    request: Request,
+    runtime: RuntimeDep,
+    log_seq: int = Query(default=0, ge=0),
+    ui_event_seq: int = Query(default=0, ge=0),
+) -> JSONResponse:
+    """Inject a cold context into an empty Runtime, and tell it where its history stands.
+
+    The two cursors ride as query parameters rather than inside the body, because the body has
+    to stay byte-for-byte the document ``GET /context`` produced -- that is what makes a
+    conversation movable by copying one file. They are the sequence numbers the control plane
+    already holds for this conversation; this Runtime's channels continue after them instead of
+    restarting at 1 and colliding.
+
+    :param log_seq: Sequence number the raw transcript should continue from.
+    :param ui_event_seq: Sequence number the AG-UI event history should continue from.
+    """
     async with runtime.run_guard.exclusive():
         current = runtime.context_store.context.context_version
         expected = request.headers.get("if-match")
@@ -109,11 +135,17 @@ async def restore_context(request: Request, runtime: RuntimeDep) -> JSONResponse
         try:
             raw = await request.json()
             context = ConversationContext.from_payload(raw)
-            restored = await runtime.context_store.restore(context)
-        except ConversationStateConflict as exc:
+            restored = await runtime.restore(
+                context,
+                log_seq=log_seq,
+                ui_event_seq=ui_event_seq,
+            )
+        except (ConversationStateConflict, AppendLogError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ConversationStateError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CursorStateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=422, detail="Invalid JSON context payload.") from exc
         return JSONResponse(
@@ -144,6 +176,12 @@ async def run(request: Request, runtime: RuntimeDep) -> Response:
         try:
             if existing_background is not None:
                 await existing_background()
+            # The barrier that makes this Runtime disposable: by the time the guard is handed
+            # back, the turn is on the control plane and not merely on local disk. Deliberately
+            # inside the same `try` as the rest of the teardown, and deliberately not able to
+            # fail the turn -- `flush_replication` reports lag rather than raising, because the
+            # client has already been sent every event and the entries are still durable here.
+            await runtime.flush_replication()
         finally:
             runtime.run_guard.release()
 
