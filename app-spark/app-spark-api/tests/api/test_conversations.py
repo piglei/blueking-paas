@@ -275,7 +275,9 @@ async def test_a_turn_is_refused_while_another_is_still_running(
     second = await post_run(aapi_client, number, "and me too")
 
     assert second.status_code == HTTPStatus.CONFLICT
-    assert "run" in json.loads(second.content)["detail"].lower()
+    assert json.loads(second.content)["detail"] == (
+        "The Agent Runtime is already executing a run for this conversation."
+    )
 
 
 async def test_a_second_conversation_on_one_project_is_refused(aapi_client, project, agent):
@@ -285,7 +287,9 @@ async def test_a_second_conversation_on_one_project_is_refused(aapi_client, proj
     response = await aapi_client.post(f"/api/projects/{PROJECT_ID}/conversations/")
 
     assert response.status_code == HTTPStatus.CONFLICT
-    assert "already has a running Agent" in json.loads(response.content)["detail"]
+    assert json.loads(response.content)["detail"] == (
+        "Another conversation already has a running Agent on this project."
+    )
 
 
 async def test_anonymous_callers_are_refused(aanonymous_api_client, project):

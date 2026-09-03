@@ -55,13 +55,24 @@ def handle_agent_runtime_error(request: HttpRequest, exc: AgentRuntimeError) -> 
     is under way its status code is already sent, and a break there is reported as an AG-UI
     ``RUN_ERROR`` event instead.
     """
-    # Both mean the Agent is occupied right now and the same request may well succeed later.
-    if isinstance(exc, AgentBusyError | AgentWorkspaceBusyError):
-        return api.create_response(request, {"detail": str(exc)}, status=HTTPStatus.CONFLICT)
+    # The original message is for operators, not callers: it may name a sibling conversation,
+    # quote the Agent's own body, or include a process log tail.
+    if isinstance(exc, AgentBusyError):
+        return api.create_response(
+            request,
+            {"detail": "The Agent Runtime is already executing a run for this conversation."},
+            status=HTTPStatus.CONFLICT,
+        )
+    if isinstance(exc, AgentWorkspaceBusyError):
+        return api.create_response(
+            request,
+            {"detail": "Another conversation already has a running Agent on this project."},
+            status=HTTPStatus.CONFLICT,
+        )
 
     logger.error("The Agent Runtime integration failed", exc_info=exc)
     return api.create_response(
         request,
-        {"detail": f"The Agent Runtime is unavailable: {exc}"},
+        {"detail": "The Agent Runtime is unavailable."},
         status=HTTPStatus.BAD_GATEWAY,
     )
