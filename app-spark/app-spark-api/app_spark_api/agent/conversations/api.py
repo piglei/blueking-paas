@@ -38,7 +38,7 @@ from app_spark_api.infras.accounts.auth import authenticated_user, login_require
 if TYPE_CHECKING:
     from django.http import HttpRequest
 
-    from app_spark_api.agent.runtime import RuntimeHealth
+    from app_spark_api.agent.conversations.services import ConversationState
 
 router = Router(tags=["conversations"], auth=login_required)
 
@@ -60,26 +60,31 @@ PROJECT_ID = Path(..., description="项目 ID")
     summary="开始一个新会话",
 )
 async def create_conversation(request: HttpRequest, project_id: str = PROJECT_ID):
-    """建一个会话，并把它的 Agent Runtime 拉起来。"""
+    """建一个会话，并把它的 Agent Runtime 拉起来。
+
+    这里是唯一会顺手拉起 Runtime 的读接口：「新开一个会话」本身就意味着马上要干活，先把启动
+    成本付掉，比让用户在第一句话上等着更好。
+    """
     project = await _get_project(request, project_id)
     conversation = await services.create_conversation(project, owner=authenticated_user(request).pk)
-    health = await services.get_health(conversation)
-    return Status(HTTPStatus.CREATED, _to_state(conversation, health))
+    await services.open_client(conversation)
+    return Status(HTTPStatus.CREATED, _to_state(conversation, await services.get_state(conversation)))
 
 
 @router.get(
     "{number}/",
     response=RuntimeStateResponse,
     url_name="conversations-retrieve",
-    summary="查看会话所在 Runtime 的状态",
+    summary="查看会话状态",
 )
 async def get_conversation(
     request: HttpRequest,
     number: int,
     project_id: str = PROJECT_ID,
 ):
+    """看一眼会话现在到哪儿了，不会为它拉起 Runtime。"""
     conversation = await _get_conversation(request, project_id, number)
-    return _to_state(conversation, await services.get_health(conversation))
+    return _to_state(conversation, await services.get_state(conversation))
 
 
 @router.post(
@@ -166,14 +171,14 @@ async def _get_conversation(request: HttpRequest, project_id: str, number: int) 
     )
 
 
-def _to_state(conversation: Conversation, health: RuntimeHealth) -> RuntimeStateResponse:
-    """Present a Runtime's health as this API's own view of a conversation."""
+def _to_state(conversation: Conversation, state: ConversationState) -> RuntimeStateResponse:
+    """Present a conversation's stored state as this API's own view of it."""
     return RuntimeStateResponse(
         number=conversation.number,
         conversation_id=conversation.id,
-        model=health.model,
-        context_version=health.context_version,
-        log_seq=health.log_seq,
-        ui_event_seq=health.ui_event_seq,
-        running=health.running,
+        model=state.model,
+        context_version=state.context_version,
+        log_seq=state.log_seq,
+        ui_event_seq=state.ui_event_seq,
+        running=state.running,
     )

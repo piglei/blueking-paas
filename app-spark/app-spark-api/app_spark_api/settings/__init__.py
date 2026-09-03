@@ -252,6 +252,13 @@ AGENT_RUNTIME_PROVIDER = settings.get("AGENT_RUNTIME_PROVIDER", "local_process")
 ## 上述驱动方式各自的配置，字段以对应的 config 类为准（local_process 见 LocalProcessConfig）
 AGENT_RUNTIME_PROVIDER_CONFIG = settings.get("AGENT_RUNTIME_PROVIDER_CONFIG", {})
 
+## 会话上下文文档存哪儿，字段见 ContextStorageConfig。一份 context 可能有好几 MB，所以走 blob
+## 存储而不是塞进 MySQL 行里。会话冷启动就是从这里把文档取回来再注入新 Runtime。
+AGENT_CONTEXT_STORAGE = settings.get(
+    "AGENT_CONTEXT_STORAGE",
+    {"backend": "host_tmp_path", "root": "/tmp/app-spark/agent-contexts"},
+)
+
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.2/howto/static-files/

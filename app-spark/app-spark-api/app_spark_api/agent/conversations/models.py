@@ -22,11 +22,27 @@ from typing import TYPE_CHECKING
 from django.db import models, transaction
 from django.db.models import F
 
+from app_spark_api.agent.conversations.state_models import (
+    ConversationContextSnapshot,
+    ConversationMessage,
+    ConversationUiEvent,
+)
 from app_spark_api.core.tenant.fields import tenant_id_field_factory
 from app_spark_api.utils.models import OwnerTimestampedModel
 
 if TYPE_CHECKING:
     from app_spark_api.core.projects.models import Project
+
+# Django 只会 import `<app>.models`，所以拆出去的状态表必须从这里能够到，否则不会被注册。
+# 它们通过字符串引用 Conversation，因此这个方向的 import 不会成环。
+__all__ = [
+    "Conversation",
+    "ConversationContextSnapshot",
+    "ConversationManager",
+    "ConversationMessage",
+    "ConversationNumber",
+    "ConversationUiEvent",
+]
 
 
 class ConversationNumber(models.Model):

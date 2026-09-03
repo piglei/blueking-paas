@@ -14,7 +14,13 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
-"""Orchestrating a conversation: the row, its Runtime, and one turn at a time."""
+"""Orchestrating a conversation: the row, its Runtime, and one turn at a time.
+
+Where a conversation's history is read from is the thing to keep straight here. The Runtime is
+authoritative only while it is alive, and it is disposable by design -- so this service reads
+its own tables, which the Runtime replicates into, and treats a Runtime as something needed
+only to *advance* a conversation, never to look at one.
+"""
 
 from __future__ import annotations
 
@@ -23,19 +29,52 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+import attrs
 from asgiref.sync import sync_to_async
 
+from app_spark_api.agent.conversations import state
+from app_spark_api.agent.conversations.internal_api import state_ingest_path
 from app_spark_api.agent.conversations.models import Conversation
-from app_spark_api.agent.runtime import AgentRuntimeClient, get_agent_runtime_provider
+from app_spark_api.agent.conversations.tokens import mint_state_token
+from app_spark_api.agent.runtime import (
+    AgentRuntimeClient,
+    EventPage,
+    StateCallback,
+    get_agent_runtime_provider,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from uuid import UUID
 
-    from app_spark_api.agent.runtime import AgentRun, EventPage, RuntimeHealth
+    from app_spark_api.agent.runtime import AgentRun, RuntimeHealth
     from app_spark_api.core.projects.models import Project
 
 logger = logging.getLogger(__name__)
+
+# Page size for the stored AG-UI event history. Decided here rather than deferred to the
+# Runtime's own default, because this read no longer goes anywhere near a Runtime.
+DEFAULT_UI_EVENT_PAGE_SIZE = 200
+MAX_UI_EVENT_PAGE_SIZE = 1_000
+
+
+@attrs.frozen
+class ConversationState:
+    """What this service can say about a conversation without starting anything.
+
+    :param context_version: Version of the archived context a cold start would resume from.
+    :param log_seq: Last raw transcript sequence number stored here.
+    :param ui_event_seq: Last AG-UI event sequence number stored here.
+    :param running: Whether a Runtime is up and currently occupied by a run.
+    :param model: Model of the live Runtime, or ``None`` when none is up. Nothing here can
+        answer it otherwise: the model is the agent's own configuration, not this service's.
+    """
+
+    context_version: int
+    log_seq: int
+    ui_event_seq: int
+    running: bool
+    model: str | None
 
 
 async def create_conversation(project: Project, *, owner: str | None) -> Conversation:
@@ -65,14 +104,38 @@ async def open_client(conversation: Conversation) -> AgentRuntimeClient:
     handle = await provider.ensure(
         project_id=conversation.project_id,
         conversation_id=str(conversation.id),
+        state_callback=_state_callback(conversation.id),
     )
     return AgentRuntimeClient(handle)
 
 
-async def get_health(conversation: Conversation) -> RuntimeHealth:
-    """Return the Runtime's current cursors, starting it if it is not up yet."""
-    client = await open_client(conversation)
-    return await client.health()
+async def get_state(conversation: Conversation) -> ConversationState:
+    """Report where a conversation stands, without starting a Runtime for it.
+
+    Not starting one is the point. Opening a conversation to look at it used to provision an
+    agent, which is expensive for a question that the stored state can answer on its own.
+
+    :param conversation: Conversation to describe.
+    :return: The cursors this service holds, plus whatever a live Runtime adds.
+    """
+    context_version, log_seq, ui_event_seq = await sync_to_async(_stored_cursors)(conversation.id)
+
+    provider = get_agent_runtime_provider()
+    handle = await provider.peek(str(conversation.id))
+    model: str | None = None
+    running = False
+    if handle is not None:
+        health = await AgentRuntimeClient(handle).health()
+        model = health.model
+        running = health.running
+
+    return ConversationState(
+        context_version=context_version,
+        log_seq=log_seq,
+        ui_event_seq=ui_event_seq,
+        running=running,
+        model=model,
+    )
 
 
 async def read_ui_events(
@@ -81,9 +144,20 @@ async def read_ui_events(
     since: int = 0,
     limit: int | None = None,
 ) -> EventPage:
-    """Read one page of the AG-UI events the Runtime has recorded so far."""
-    client = await open_client(conversation)
-    return await client.read_ui_events(since=since, limit=limit)
+    """Read one page of the conversation's AG-UI event history from this service's own tables.
+
+    Deliberately not from the Runtime. This is the read behind "open a conversation and see
+    what happened in it", and a conversation whose Runtime is long gone has to answer it just
+    as well as one still in progress.
+
+    :param conversation: Conversation to read.
+    :param since: Cursor to resume from; ``0`` starts at the beginning.
+    :param limit: Page size, capped at :data:`MAX_UI_EVENT_PAGE_SIZE`.
+    :return: One page, plus the cursor needed to ask for the next.
+    """
+    page_size = min(limit or DEFAULT_UI_EVENT_PAGE_SIZE, MAX_UI_EVENT_PAGE_SIZE)
+    records, last_seq = await state.aread_ui_events(conversation.id, since=since, limit=page_size)
+    return EventPage(since=since, last_seq=last_seq, records=records)
 
 
 async def start_run(conversation: Conversation, *, content: str) -> AgentRun:
@@ -102,7 +176,72 @@ async def start_run(conversation: Conversation, *, content: str) -> AgentRun:
     """
     client = await open_client(conversation)
     health = await client.health()
+    health = await _resume_if_cold(conversation, client, health)
     return await client.start_run(content=content, context_version=health.context_version)
+
+
+async def _resume_if_cold(
+    conversation: Conversation,
+    client: AgentRuntimeClient,
+    health: RuntimeHealth,
+) -> RuntimeHealth:
+    """Hand an untouched Runtime the conversation it is supposed to be continuing.
+
+    This is where a cold start actually happens, and it is on the run path rather than at
+    provisioning time because that is the first moment the history is genuinely needed.
+
+    A Runtime is only treated as untouched when it reports both no conversation and version 0.
+    Either alone would be ambiguous, and injecting into a Runtime that already holds a
+    conversation would be destroying one.
+
+    :return: The health to start the run against, unchanged when there was nothing to resume.
+    """
+    if health.conversation_id is not None or health.context_version != 0:
+        return health
+
+    document = await state.aload_context(conversation.id)
+    if document is None:
+        return health
+
+    log_seq = await state.alast_seq(conversation.id, state.MESSAGE_CHANNEL)
+    ui_event_seq = await state.alast_seq(conversation.id, state.UI_EVENT_CHANNEL)
+    restored_version = await client.restore_context(
+        document,
+        if_match=health.context_version,
+        log_seq=log_seq,
+        ui_event_seq=ui_event_seq,
+    )
+    logger.info(
+        "Conversation %s was resumed on a cold Runtime at context version %d, "
+        "continuing from log seq %d and ui event seq %d",
+        conversation.id,
+        restored_version,
+        log_seq,
+        ui_event_seq,
+    )
+    return attrs.evolve(health, context_version=restored_version)
+
+
+def _state_callback(conversation_id: UUID) -> StateCallback:
+    """Describe where a Runtime for this conversation should replicate its state.
+
+    The path only; the provider adds the host, because only it knows where this service is
+    reachable from wherever the Runtime is about to run.
+    """
+    return StateCallback(
+        path=state_ingest_path(conversation_id),
+        token=mint_state_token(conversation_id),
+    )
+
+
+def _stored_cursors(conversation_id: UUID) -> tuple[int, int, int]:
+    """Return the archived context version and both channel cursors, in one thread hop."""
+    document_version = state.context_version(conversation_id)
+    return (
+        document_version,
+        state.last_seq(conversation_id, state.MESSAGE_CHANNEL),
+        state.last_seq(conversation_id, state.UI_EVENT_CHANNEL),
+    )
 
 
 async def stream_run(run: AgentRun, conversation_id: UUID) -> AsyncIterator[bytes]:

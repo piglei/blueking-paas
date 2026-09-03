@@ -24,14 +24,14 @@ from app_spark_api.utils import structure_config, validate_non_empty_string
 
 @attrs.frozen
 class HostTmpPathConfig:
-    """Configuration for storing a source package on the current host."""
+    """Configuration for storing a blob on the current host."""
 
     path: str = attrs.field(validator=validate_non_empty_string)
 
 
 @attrs.frozen
 class BkRepoConfig:
-    """Configuration for storing a source package in BkRepo."""
+    """Configuration for storing a blob in BkRepo."""
 
     bucket: str = attrs.field(validator=validate_non_empty_string)
     key: str = attrs.field(validator=validate_non_empty_string)

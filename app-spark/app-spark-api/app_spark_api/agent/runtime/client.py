@@ -140,6 +140,53 @@ class AgentRuntimeClient:
             params["limit"] = limit
         return EventPage.from_payload(await self._get_json("/ui-events", params=params))
 
+    async def restore_context(
+        self,
+        document: dict[str, Any],
+        *,
+        if_match: int,
+        log_seq: int,
+        ui_event_seq: int,
+    ) -> int:
+        """Seed an empty Runtime with an archived conversation, and with where it left off.
+
+        This is the cold start. The document is forwarded byte for byte as it was archived --
+        it is the Runtime's own export format and this service does not interpret it -- while
+        the two cursors ride as query parameters, which is what keeps the body identical to
+        what a ``GET /context`` produced.
+
+        The cursors matter as much as the document. Without them the new Runtime would number
+        its first entry 1, colliding with the entry 1 this service already holds for the same
+        conversation, and there would be no way to tell the two apart afterwards.
+
+        :param document: Archived context, as ``ConversationContext.as_payload`` produced it.
+        :param if_match: Context version the Runtime is expected to be at, normally ``0``. A
+            Runtime that has moved on refuses rather than losing a conversation of its own.
+        :param log_seq: Last transcript sequence number this service holds.
+        :param ui_event_seq: Last AG-UI event sequence number this service holds.
+        :return: The context version the Runtime now serves.
+        :raises AgentBusyError: If a run is occupying the Runtime.
+        :raises AgentUnavailableError: If the Runtime cannot be reached or refuses the restore.
+        """
+        params = {"log_seq": log_seq, "ui_event_seq": ui_event_seq}
+        try:
+            async with self._new_http_client(self._timeout_seconds) as client:
+                response = await client.put(
+                    "/context",
+                    params=params,
+                    headers={"If-Match": str(if_match)},
+                    json=document,
+                )
+        except httpx2.HTTPError as exc:
+            raise AgentUnavailableError(f"Could not restore the context on the Agent Runtime: {exc}") from exc
+
+        if response.status_code == HTTPStatus.CONFLICT:
+            raise AgentBusyError(await self._read_error(response))
+        if response.status_code != HTTPStatus.OK:
+            detail = await self._read_error(response)
+            raise AgentUnavailableError(f"The Agent Runtime refused the context with {response.status_code}: {detail}")
+        return _restored_version(response)
+
     async def start_run(
         self,
         *,
@@ -226,3 +273,16 @@ class AgentRuntimeClient:
         if isinstance(payload, dict) and "detail" in payload:
             return str(payload["detail"])
         return response.text[:200]
+
+
+def _restored_version(response: httpx2.Response) -> int:
+    """Read the context version out of a successful restore.
+
+    Taken from the ``ETag`` the Runtime tags its context with, which is the same value the
+    body carries -- and reading it from the header means not having to parse a document that
+    can run to megabytes just to learn one integer.
+    """
+    try:
+        return int(response.headers["ETag"])
+    except (KeyError, ValueError) as exc:
+        raise AgentUnavailableError(f"The Agent Runtime restored a context without a usable ETag: {exc}") from exc

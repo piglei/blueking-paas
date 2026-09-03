@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from ninja import NinjaAPI, Router
 
 from app_spark_api.agent.conversations.api import router as conversations_router
+from app_spark_api.agent.conversations.internal_api import router as conversation_state_router
 from app_spark_api.agent.runtime import (
     AgentBusyError,
     AgentRuntimeError,
@@ -38,6 +39,11 @@ logger = logging.getLogger(__name__)
 root_router = Router()
 root_router.add_router("/accounts/", accounts_router)
 root_router.add_router("/projects/{project_id}/conversations/", conversations_router)
+# Mounted under `/internal/` and addressed by conversation id rather than by project and
+# number: the caller is an Agent Runtime this service started, it has no user and no project
+# context, and the token it holds names exactly one conversation. Keeping it off the
+# project-scoped prefix is also what keeps it visibly out of the user-facing surface.
+root_router.add_router("/internal/conversations/", conversation_state_router)
 
 api = NinjaAPI(title="App Spark API", urls_namespace="api")
 api.add_router("", root_router)

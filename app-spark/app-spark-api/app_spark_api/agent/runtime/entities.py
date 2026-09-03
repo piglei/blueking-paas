@@ -35,6 +35,9 @@ class LocalProcessConfig:
     :param workspace_root: Parent of the per-Project workspace directories.
     :param state_root: Parent of the per-conversation state directories. Must not sit inside
         ``workspace_root``, or the agent's own file tools could corrupt its history.
+    :param callback_base_url: Where a spawned Runtime can reach *this* service, to replicate
+        its state back. Loopback is right for a process on this host and wrong for anything
+        else, which is exactly why it is provider configuration rather than a global setting.
     :param model: Value for ``APP_SPARK_AGENT_MODEL``; left to the agent's default when unset.
     :param api_key: Value for ``APP_SPARK_AGENT_API_KEY``; left to the agent's default when
         unset.
@@ -47,10 +50,24 @@ class LocalProcessConfig:
     agent_project_dir: str = attrs.field(validator=validate_non_empty_string)
     workspace_root: str = attrs.field(validator=validate_non_empty_string)
     state_root: str = attrs.field(validator=validate_non_empty_string)
+    callback_base_url: str = "http://127.0.0.1:8000"
     model: str | None = None
     api_key: str | None = None
     startup_timeout_seconds: float = 60.0
     extra_env: dict[str, str] = attrs.field(factory=dict)
+
+
+@attrs.frozen
+class StateCallback:
+    """How a Runtime is told to write its state back to this service.
+
+    :param path: Conversation-scoped root, relative to this service's root. The Runtime appends
+        its own channel names to it and never has to parse it.
+    :param token: Bearer token authorizing writes to that one conversation.
+    """
+
+    path: str
+    token: str
 
 
 @attrs.frozen

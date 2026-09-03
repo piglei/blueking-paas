@@ -35,7 +35,7 @@ from pathlib import Path
 
 import httpx2
 
-from app_spark_api.agent.runtime.entities import AgentRuntimeHandle, LocalProcessConfig
+from app_spark_api.agent.runtime.entities import AgentRuntimeHandle, LocalProcessConfig, StateCallback
 from app_spark_api.agent.runtime.exceptions import AgentProvisionError, AgentWorkspaceBusyError
 from app_spark_api.agent.runtime.providers.base import AgentRuntimeProvider
 
@@ -128,7 +128,13 @@ class LocalProcessProvider(AgentRuntimeProvider):
         """
         return Path(self.config.state_root) / conversation_id
 
-    async def ensure(self, *, project_id: str, conversation_id: str) -> AgentRuntimeHandle:
+    async def ensure(
+        self,
+        *,
+        project_id: str,
+        conversation_id: str,
+        state_callback: StateCallback | None = None,
+    ) -> AgentRuntimeHandle:
         async with self._lock:
             existing = self._runtimes.get(conversation_id)
             if existing is not None:
@@ -148,8 +154,18 @@ class LocalProcessProvider(AgentRuntimeProvider):
                 conversation_id=conversation_id,
                 workspace_dir=workspace_dir,
                 state_dir=self.state_dir(conversation_id),
+                state_callback=state_callback,
             )
             self._runtimes[conversation_id] = runtime
+            return runtime.handle
+
+    async def peek(self, conversation_id: str) -> AgentRuntimeHandle | None:
+        async with self._lock:
+            runtime = self._runtimes.get(conversation_id)
+            # A dead process is deliberately not forgotten here: cleaning up is `ensure`'s job,
+            # and it wants the log of the corpse to explain why it had to start a replacement.
+            if runtime is None or not runtime.alive:
+                return None
             return runtime.handle
 
     async def terminate(self, conversation_id: str) -> None:
@@ -190,6 +206,7 @@ class LocalProcessProvider(AgentRuntimeProvider):
         conversation_id: str,
         workspace_dir: Path,
         state_dir: Path,
+        state_callback: StateCallback | None,
     ) -> _LocalRuntime:
         """Start one Runtime and return it once it answers ``/health``."""
         port = _free_port()
@@ -204,6 +221,7 @@ class LocalProcessProvider(AgentRuntimeProvider):
             workspace_dir=workspace_dir,
             state_dir=state_dir,
             log_path=log_path,
+            state_callback=state_callback,
         )
 
         _spawned.append(process)
@@ -230,6 +248,7 @@ class LocalProcessProvider(AgentRuntimeProvider):
         workspace_dir: Path,
         state_dir: Path,
         log_path: Path,
+        state_callback: StateCallback | None,
     ) -> subprocess.Popen[bytes]:
         """Prepare the directories and fork the Runtime.
 
@@ -270,18 +289,34 @@ class LocalProcessProvider(AgentRuntimeProvider):
                     ],
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,
-                    env=self._build_env(workspace_dir=workspace_dir, state_dir=state_dir),
+                    env=self._build_env(
+                        workspace_dir=workspace_dir,
+                        state_dir=state_dir,
+                        state_callback=state_callback,
+                    ),
                 )
             except OSError as exc:
                 raise AgentProvisionError(f"Could not spawn an Agent Runtime: {exc}") from exc
 
-    def _build_env(self, *, workspace_dir: Path, state_dir: Path) -> dict[str, str]:
+    def _build_env(
+        self,
+        *,
+        workspace_dir: Path,
+        state_dir: Path,
+        state_callback: StateCallback | None,
+    ) -> dict[str, str]:
         """Build the child's environment from this service's own plus the agent's settings."""
         env = {
             **os.environ,
             f"{ENV_PREFIX}WORKSPACE": str(workspace_dir),
             f"{ENV_PREFIX}STATE_DIR": str(state_dir),
         }
+        if state_callback is not None:
+            # An address already scoped to one conversation, plus a token that authorizes only
+            # that one. Deliberately all the Runtime learns: it replicates to a URL it was
+            # handed, and never has to know what a conversation is or which one it is serving.
+            env[f"{ENV_PREFIX}CONTROL_PLANE_URL"] = f"{self.config.callback_base_url.rstrip('/')}{state_callback.path}"
+            env[f"{ENV_PREFIX}CONTROL_PLANE_TOKEN"] = state_callback.token
         if self.config.model is not None:
             env[f"{ENV_PREFIX}MODEL"] = self.config.model
         if self.config.api_key is not None:

@@ -34,6 +34,7 @@ from app_spark_api.agent.runtime.entities import (
     EventPage,
     LocalProcessConfig,
     RuntimeHealth,
+    StateCallback,
 )
 from app_spark_api.agent.runtime.exceptions import (
     AgentBusyError,
@@ -64,6 +65,7 @@ __all__ = [
     "EventPage",
     "LocalProcessConfig",
     "RuntimeHealth",
+    "StateCallback",
     "get_agent_runtime_provider",
     "make_agent_runtime_provider",
 ]

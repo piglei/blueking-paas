@@ -22,17 +22,25 @@ real HTTP. That is worth the seconds it takes: a fake provider would prove that 
 talks to a fake provider, whereas these prove the whole chain -- provisioning, the HTTP client,
 the AG-UI passthrough, and the agent really writing to a workspace.
 
+The replication half needs one more thing: this service has to be reachable from the spawned
+Runtime, which is a separate process and cannot call an in-process test client. Hence
+``live_server`` -- the Runtime pushes its state to a real socket, and the assertions read it
+back out of the database through the ordinary async client.
+
 Prerequisite: ``cd agent && uv sync``. Without the agent's virtualenv these tests skip with a
 reason rather than failing in a way nobody can read.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
+import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -45,15 +53,27 @@ if TYPE_CHECKING:
     from django.http import StreamingHttpResponse
     from django.test import AsyncClient
 
+    from app_spark_api.agent.runtime.providers.local import LocalProcessProvider
+
 pytestmark = pytest.mark.django_db(transaction=True)
 
 AGENT_PROJECT_DIR = Path(__file__).resolve().parents[3] / "agent"
 
 PROJECT_ID = "spark-demo"
 
-# What the agent's `fake:write-file` scenario writes, one per turn.
+# What the agent's `fake:write-file` scenario writes, one per turn. It numbers the note by
+# counting the user prompts in the history it was given, which makes the filename a direct
+# assertion about whether the conversation's context really came back.
 FIRST_NOTE = "fake-agent-note-1.md"
 SECOND_NOTE = "fake-agent-note-2.md"
+
+# How long to wait for the Runtime to finish pushing a turn. Replication is deliberately
+# behind the run: the client is sent RUN_FINISHED as soon as the events are out, and the
+# Runtime's own barrier is before it accepts another run, not before the client is told. So a
+# read that follows a turn immediately is allowed to be a moment early, and these tests wait
+# for the cursor to move rather than sleeping and hoping.
+REPLICATION_TIMEOUT_SECONDS = 15.0
+REPLICATION_POLL_INTERVAL_SECONDS = 0.05
 
 
 @pytest.fixture
@@ -79,16 +99,16 @@ def workspace_root(tmp_path) -> Path:
 
 
 @pytest.fixture
-async def agent(settings, tmp_path, workspace_root) -> AsyncIterator[None]:
+async def agent(settings, tmp_path, workspace_root, live_server) -> AsyncIterator[None]:
     """Point the service at the real agent, scripted with the free `write-file` scenario."""
-    async for _ in _configured_agent(settings, tmp_path, workspace_root, "fake:write-file"):
+    async for _ in _configured_agent(settings, tmp_path, workspace_root, live_server, "fake:write-file"):
         yield None
 
 
 @pytest.fixture
-async def slow_agent(settings, tmp_path, workspace_root) -> AsyncIterator[None]:
+async def slow_agent(settings, tmp_path, workspace_root, live_server) -> AsyncIterator[None]:
     """Point the service at an agent that keeps a run open long enough to collide with."""
-    async for _ in _configured_agent(settings, tmp_path, workspace_root, "fake:slow"):
+    async for _ in _configured_agent(settings, tmp_path, workspace_root, live_server, "fake:slow"):
         yield None
 
 
@@ -96,18 +116,27 @@ async def _configured_agent(
     settings: Any,
     tmp_path: Path,
     workspace_root: Path,
+    live_server: Any,
     model: str,
 ) -> AsyncIterator[None]:
     """Configure the local provider, and make sure it leaves no process behind."""
     if not (AGENT_PROJECT_DIR / ".venv").exists():
         pytest.skip(f"The agent has no virtualenv yet; run `cd {AGENT_PROJECT_DIR} && uv sync`")
 
+    # Archive contexts under the test's own directory rather than the shared default root.
+    settings.AGENT_CONTEXT_STORAGE = {
+        "backend": "host_tmp_path",
+        "root": str(tmp_path / "agent-contexts"),
+    }
     settings.AGENT_RUNTIME_PROVIDER = "local_process"
     settings.AGENT_RUNTIME_PROVIDER_CONFIG = {
         "agent_project_dir": str(AGENT_PROJECT_DIR),
         "workspace_root": str(workspace_root),
         "state_root": str(tmp_path / "agent-state"),
         "model": model,
+        # The spawned Runtime is a real process, so the only address it can push its state to
+        # is a real one. Everything else in these tests goes through the in-process client.
+        "callback_base_url": live_server.url,
         # Long enough that a second request lands while the run is still open, short enough
         # that a test which forgets to release it still finishes.
         "extra_env": {"APP_SPARK_AGENT_FAKE_DELAY_SECONDS": "5"},
@@ -170,6 +199,54 @@ def assistant_reply(events: list[dict[str, Any]]) -> str:
     return "".join(str(event["delta"]) for event in events if event.get("type") == "TEXT_MESSAGE_CONTENT")
 
 
+async def read_state(client: AsyncClient, number: int) -> dict[str, Any]:
+    """Read what this service knows about a conversation, without touching its Runtime."""
+    response = await client.get(f"/api/projects/{PROJECT_ID}/conversations/{number}/")
+    assert response.status_code == HTTPStatus.OK, response.content
+    return json.loads(response.content)
+
+
+async def read_ui_events(client: AsyncClient, number: int, since: int = 0) -> dict[str, Any]:
+    """Read a page of a conversation's stored AG-UI history."""
+    response = await client.get(
+        f"/api/projects/{PROJECT_ID}/conversations/{number}/ui-events/",
+        data={"since": since},
+    )
+    assert response.status_code == HTTPStatus.OK, response.content
+    return json.loads(response.content)
+
+
+async def wait_for_replication(
+    client: AsyncClient,
+    number: int,
+    *,
+    after: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Wait until a finished turn has settled: pushed here, and the Runtime free again.
+
+    The Runtime flushes before it releases its run guard, so a turn is briefly stored here
+    while the Runtime still calls itself busy. Waiting for both makes "the turn is over" a
+    single thing tests can ask for.
+
+    :param after: The state read before the turn, if there was one. Every cursor has to move
+        past it, which is what makes this a wait for *this* turn rather than the previous one.
+    """
+    floor = after or {"context_version": 0, "log_seq": 0, "ui_event_seq": 0}
+    cursors = ("context_version", "log_seq", "ui_event_seq")
+    deadline = time.monotonic() + REPLICATION_TIMEOUT_SECONDS
+    while True:
+        state = await read_state(client, number)
+        if not state["running"] and all(state[cursor] > floor[cursor] for cursor in cursors):
+            return state
+        if time.monotonic() >= deadline:
+            behind = {cursor: (floor[cursor], state[cursor]) for cursor in cursors}
+            pytest.fail(
+                f"The Runtime never settled its turn within {REPLICATION_TIMEOUT_SECONDS}s: "
+                f"running={state['running']}, cursors={behind}"
+            )
+        await asyncio.sleep(REPLICATION_POLL_INTERVAL_SECONDS)
+
+
 # --- The tests ---------------------------------------------------------------------------
 
 
@@ -220,19 +297,16 @@ async def test_a_second_turn_continues_the_same_conversation(
     number = state["number"]
 
     await run_turn(aapi_client, number, "write my first note")
+    first = await wait_for_replication(aapi_client, number)
     await run_turn(aapi_client, number, "write my second note")
 
     # A second note rather than a rewritten first one: the history the Runtime kept is what
     # told the agent this was turn two. Nothing about it was resent by this service.
     assert (workspace_root / PROJECT_ID / SECOND_NOTE).exists()
 
-    response = await aapi_client.get(f"/api/projects/{PROJECT_ID}/conversations/{number}/")
-    assert response.status_code == HTTPStatus.OK
-    after = json.loads(response.content)
+    # Both turns are in this service's storage, and the second one only added to the first.
+    after = await wait_for_replication(aapi_client, number, after=first)
     assert after["context_version"] >= 2
-    assert after["log_seq"] > 0
-    assert after["ui_event_seq"] > 0
-    assert after["running"] is False
 
 
 async def test_missed_events_can_be_read_back_after_the_stream_is_gone(
@@ -243,11 +317,10 @@ async def test_missed_events_can_be_read_back_after_the_stream_is_gone(
     state = await create_conversation(aapi_client)
     number = state["number"]
     streamed = await run_turn(aapi_client, number, "write my first note")
+    await wait_for_replication(aapi_client, number)
 
-    response = await aapi_client.get(f"/api/projects/{PROJECT_ID}/conversations/{number}/ui-events/")
+    page = await read_ui_events(aapi_client, number)
 
-    assert response.status_code == HTTPStatus.OK
-    page = json.loads(response.content)
     assert page["exhausted"] is True
     assert page["last_seq"] == len(page["records"]) > 0
     replayed = [record["event"]["type"] for record in page["records"]]
@@ -256,6 +329,63 @@ async def test_missed_events_can_be_read_back_after_the_stream_is_gone(
     # The history is the same run, with the per-token deltas already coalesced -- so it is
     # shorter than the live stream but tells the same story.
     assert len(replayed) <= len(streamed)
+
+
+async def test_history_is_readable_without_waking_the_runtime(aapi_client, project, agent):
+    """Opening an idle conversation must not cost a Runtime, however long its history is."""
+    state = await create_conversation(aapi_client)
+    number, conversation_id = state["number"], state["conversation_id"]
+    await run_turn(aapi_client, number, "write my first note")
+    await wait_for_replication(aapi_client, number)
+
+    provider = cast("LocalProcessProvider", get_agent_runtime_provider())
+    await provider.terminate(conversation_id)
+
+    page = await read_ui_events(aapi_client, number)
+    idle = await read_state(aapi_client, number)
+
+    assert page["last_seq"] > 0
+    assert idle["running"] is False
+    assert await provider.peek(conversation_id) is None
+
+
+async def test_a_conversation_outlives_the_runtime_that_held_it(
+    aapi_client,
+    project,
+    agent,
+    workspace_root,
+):
+    """The real cold start: everything the Runtime knew is destroyed, and the talk goes on.
+
+    Not just the process -- its state directory too, which is where the transcript, the AG-UI
+    history and the context all lived. What comes back has to come back from this service.
+    """
+    state = await create_conversation(aapi_client)
+    number, conversation_id = state["number"], state["conversation_id"]
+    await run_turn(aapi_client, number, "write my first note")
+    first = await wait_for_replication(aapi_client, number)
+
+    provider = cast("LocalProcessProvider", get_agent_runtime_provider())
+    await provider.terminate(conversation_id)
+    shutil.rmtree(provider.state_dir(conversation_id))
+
+    # The history survived a Runtime that no longer exists, in any form.
+    before = await read_ui_events(aapi_client, number)
+    assert before["records"][0]["event"]["type"] == "RUN_STARTED"
+
+    await run_turn(aapi_client, number, "write my second note")
+
+    # `fake:write-file` numbers its note by counting the user prompts it was given, so a second
+    # note means the replacement Runtime was handed the first turn -- a Runtime starting from
+    # nothing would have written the first note again.
+    assert (workspace_root / PROJECT_ID / SECOND_NOTE).exists()
+
+    # And the two Runtimes wrote into one flat sequence rather than colliding at seq 1: the
+    # second generation was seeded with where the first one left off.
+    after = await wait_for_replication(aapi_client, number, after=first)
+    page = await read_ui_events(aapi_client, number)
+    assert [record["seq"] for record in page["records"]] == list(range(1, after["ui_event_seq"] + 1))
+    assert after["ui_event_seq"] > first["ui_event_seq"]
 
 
 async def test_a_turn_is_refused_while_another_is_still_running(
