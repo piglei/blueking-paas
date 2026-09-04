@@ -112,8 +112,10 @@ class ConversationManager(models.Manager["Conversation"]):
 class Conversation(OwnerTimestampedModel):
     """一次由 Agent 驱动的 Project 开发会话，对应 Agent Runtime 里的一个 conversation。
 
-    会话内容本身不在这里：消息历史、AG-UI 事件、上下文都由 Agent Runtime 自己持久化，这张表
-    只回答「这个 Project 有哪些会话」。
+    这张表只回答「这个 Project 有哪些会话」。会话内容本身在旁边的三张状态表里——消息历史、
+    AG-UI 事件、上下文都由 Runtime 后台回写过来（见
+    :mod:`~app_spark_api.agent.conversations.state_models`）。Runtime 自己的状态目录是可丢弃的
+    本地缓冲，不是权威副本。
 
     Runtime 的 workspace 与状态目录也不落库，而是由 provider 的配置按 project_id 与
     conversation_id 确定性推导出来。等到 provisioning 不再确定性（比如换成远程沙箱，地址由
@@ -132,6 +134,13 @@ class Conversation(OwnerTimestampedModel):
     # 对外露出的是它而不是上面的 UUID：URL 里 `/conversations/3/` 比一串 36 位的十六进制好认、
     # 好念、也好在日志和工单里对齐。UUID 仍然是这个会话的身份，只是不必让人去读它。
     number = models.PositiveIntegerField(verbose_name="会话序号")
+
+    # Runtime 回写状态用的 token 里带着这个值，吊销就 +1，于是之前签发的全部作废。
+    # token 本身没有过期时间——一个 Runtime 可能在两轮对话之间空转很久，让 token 自己过期只会把
+    # 「暂停的会话」变成「丢掉的会话」——所以吊销必须是显式的，这个字段就是那个开关。它存在的
+    # 理由是本服务并不能真的保证「一个会话只有一个 Runtime 在写」：进程句柄只在内存里，重启之后
+    # 上一代残留的 Runtime 手里那张 token 依然有效。
+    state_epoch = models.PositiveIntegerField(verbose_name="状态回写授权代次", default=1)
 
     tenant_id = tenant_id_field_factory(db_index=False)
 

@@ -24,6 +24,10 @@ The Runtime pushes; this is what receives. Two properties are what the whole sch
   number, something was lost in between, and accepting it would leave a hole no later write can
   fill. Instead the batch is dropped and the true cursor is returned, which is exactly what the
   Runtime needs to rewind and re-send from the right place.
+* Writes for one conversation are serialized on its row. Both properties above are read-then-
+  write, so they only hold against a single writer -- and "one Runtime per conversation" is not
+  something this service can actually guarantee, since a Runtime it has lost track of keeps a
+  perfectly valid token. The lock is what makes the assumption true rather than hoped for.
 """
 
 from __future__ import annotations
@@ -38,6 +42,9 @@ from django.db.models import Max
 from django.utils.dateparse import parse_datetime
 
 from app_spark_api.agent.conversations.context_storage import blob_location
+
+# `models` imports `state_models`, never this module, so this direction cannot cycle.
+from app_spark_api.agent.conversations.models import Conversation
 from app_spark_api.agent.conversations.state_models import (
     ConversationContextSnapshot,
     ConversationMessage,
@@ -105,8 +112,9 @@ def append_records(
         order. Their sequence numbers must be contiguous.
     :return: The last sequence number now stored. Lower than the batch's own last entry when
         the batch was refused for leaving a gap, which is how the Runtime learns to rewind.
-    :raises ConversationStateError: If the batch is internally inconsistent -- a caller bug,
-        as opposed to the two sides having drifted apart.
+    :raises ConversationStateError: If the batch is internally inconsistent -- a caller bug, as
+        opposed to the two sides having drifted apart -- or if the conversation has been deleted
+        underneath the push.
     """
     spec = CHANNELS[channel]
     if not records:
@@ -118,10 +126,18 @@ def append_records(
         raise ConversationStateError(f"the {channel} batch is not contiguous: {seqs[0]}..{seqs[-1]}")
 
     with transaction.atomic():
+        # 先锁会话行，再读游标。这一侧假定「一个会话同一时刻只有一个 Runtime 在写」，但那个假定
+        # 并不由代码保证：LocalProcessProvider 的进程句柄只存在内存里，本服务重启之后，上一代
+        # 残留的 Runtime 和新 spawn 出来的那个会拿着同样有效的 token 并发写同一个会话。
+        #
+        # 没有这把锁的话，下面的 Max(seq) 是无锁读：两个 writer 各自读到同一个 current，于是
+        # 一批本该被接收的记录会被误判成 gap 而拒掉，Runtime 那侧则表现为反复 rewind。锁一直
+        # 持有到事务提交，所以同一个会话的回写在这里排成一队。
+        _lock_conversation(conversation_id)
         current = last_seq(conversation_id, channel)
         if seqs[0] > current + 1:
-            # Refused, not stored. Answering with the real cursor turns a lost stretch into
-            # something the Runtime can repair on its next pass.
+            # Refused, not stored. Answering with the real cursor is what lets the Runtime
+            # rewind to the hole and re-send it, rather than having to guess where to restart.
             return current
         # `ignore_conflicts` is what makes a redelivered batch harmless: the unique constraint
         # on (conversation, seq) recognizes every entry that is already here.
@@ -161,6 +177,11 @@ def save_context(conversation_id: Any, payload: dict[str, Any]) -> int:
     document never arrived would send a cold start off to restore something that is not there,
     whereas a document with no row pointing at it is simply retried and overwritten.
 
+    Both the version check and the blob write happen under the row's lock. Every version of a
+    conversation's context shares one blob key, so an unlocked write is exactly what lets a
+    slower writer carrying an older document land on top of a newer one -- and then walk the
+    row's version back to match it, which is the one outcome a cold start cannot detect.
+
     :param conversation_id: Conversation the context belongs to.
     :param payload: Context document as ``ConversationContext.as_payload`` produced it.
     :return: The context version now archived.
@@ -171,17 +192,17 @@ def save_context(conversation_id: Any, payload: dict[str, Any]) -> int:
         raise ConversationStateError("the context document has no non-negative context_version")
 
     backend, config = blob_location(conversation_id)
-    snapshot, _ = ConversationContextSnapshot.objects.get_or_create(
-        conversation_id=conversation_id,
-        defaults={"backend": backend, "config": config},
-    )
-    if version <= snapshot.context_version:
-        return snapshot.context_version
+    with transaction.atomic():
+        snapshot = _locked_snapshot(conversation_id, backend, config)
+        # Re-read under the lock: whoever held it before us may have archived a newer version
+        # while this call was waiting, and that one must not be walked back.
+        if version <= snapshot.context_version:
+            return snapshot.context_version
 
-    snapshot.get_blob_store().put_bytes(json.dumps(payload).encode())
-    snapshot.context_version = version
-    snapshot.save(update_fields=["context_version", "updated"])
-    return version
+        snapshot.get_blob_store().put_bytes(json.dumps(payload).encode())
+        snapshot.context_version = version
+        snapshot.save(update_fields=["context_version", "updated"])
+        return version
 
 
 def context_version(conversation_id: Any) -> int:
@@ -225,6 +246,10 @@ def clear(conversation_id: Any) -> None:
     is deliberately left where it is: the row that names it is gone, so nothing can reach it,
     and a failed remote delete must not stop the rows from going away.
 
+    Whoever builds that operation has to revoke the conversation's state tokens as well (see
+    :func:`~app_spark_api.agent.conversations.services.revoke_state_access`). Wiping the rows
+    while a Runtime still holds a valid token only empties them until its next push.
+
     :param conversation_id: Conversation to wipe.
     """
     ConversationMessage.objects.filter(conversation_id=conversation_id).delete()
@@ -241,6 +266,52 @@ asave_context = sync_to_async(save_context)
 aload_context = sync_to_async(load_context)
 alast_seq = sync_to_async(last_seq)
 acontext_version = sync_to_async(context_version)
+
+
+def _lock_conversation(conversation_id: Any) -> None:
+    """Take the conversation's row lock, serializing every writer for that one conversation.
+
+    The conversation row is locked rather than the channel rows, because the rows a batch is
+    about to insert do not exist yet -- there is nothing there to lock, and the gap check reads
+    an aggregate that no row lock would cover either. The conversation row is the one object
+    every writer of this conversation's state has to pass through.
+
+    Only the primary key is selected: the lock is the point, not the row's contents.
+
+    :param conversation_id: Conversation to lock. Must be called inside a transaction.
+    :raises ConversationStateError: If the conversation no longer exists.
+    """
+    locked = Conversation.objects.select_for_update().filter(id=conversation_id).values_list("pk", flat=True).first()
+    if locked is None:
+        raise ConversationStateError(f"conversation {conversation_id} no longer exists")
+
+
+def _locked_snapshot(
+    conversation_id: Any,
+    backend: str,
+    config: dict[str, Any],
+) -> ConversationContextSnapshot:
+    """Return this conversation's context row with its lock held, creating it when missing.
+
+    Created in a separate statement first, because a row that does not exist yet cannot be
+    locked. Two writers racing to create it are settled by the primary key, and both then
+    contend for the same lock on the survivor.
+
+    Deliberately a different row from the one :func:`_lock_conversation` takes. The context is
+    one row that already exists to be locked, so it needs no stand-in -- and keeping the two
+    apart means a multi-megabyte blob upload cannot stall the channel appends of a run in
+    progress. Neither path takes both locks, so there is no order for them to disagree on.
+
+    :param conversation_id: Conversation whose context row is wanted.
+    :param backend: Blob backend to record on a freshly created row.
+    :param config: Blob backend configuration to record on a freshly created row.
+    :return: The locked row. Must be called inside a transaction.
+    """
+    ConversationContextSnapshot.objects.get_or_create(
+        conversation_id=conversation_id,
+        defaults={"backend": backend, "config": config},
+    )
+    return ConversationContextSnapshot.objects.select_for_update().get(conversation_id=conversation_id)
 
 
 def _structure_record(

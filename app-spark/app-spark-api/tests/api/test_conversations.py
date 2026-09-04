@@ -228,6 +228,10 @@ async def wait_for_replication(
     while the Runtime still calls itself busy. Waiting for both makes "the turn is over" a
     single thing tests can ask for.
 
+    Both flags are waited on, not just ``running``. A flush that timed out releases the run
+    guard anyway, so ``running`` alone would let a test read the database while the Runtime is
+    still ahead of it -- which is the flake this helper exists to prevent.
+
     :param after: The state read before the turn, if there was one. Every cursor has to move
         past it, which is what makes this a wait for *this* turn rather than the previous one.
     """
@@ -236,13 +240,15 @@ async def wait_for_replication(
     deadline = time.monotonic() + REPLICATION_TIMEOUT_SECONDS
     while True:
         state = await read_state(client, number)
-        if not state["running"] and all(state[cursor] > floor[cursor] for cursor in cursors):
+        idle = not state["running"] and not state["replication_pending"]
+        if idle and all(state[cursor] > floor[cursor] for cursor in cursors):
             return state
         if time.monotonic() >= deadline:
             behind = {cursor: (floor[cursor], state[cursor]) for cursor in cursors}
             pytest.fail(
                 f"The Runtime never settled its turn within {REPLICATION_TIMEOUT_SECONDS}s: "
-                f"running={state['running']}, cursors={behind}"
+                f"running={state['running']}, "
+                f"replication_pending={state['replication_pending']}, cursors={behind}"
             )
         await asyncio.sleep(REPLICATION_POLL_INTERVAL_SECONDS)
 

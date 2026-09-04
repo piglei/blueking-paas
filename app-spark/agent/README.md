@@ -81,10 +81,15 @@ APP_SPARK_AGENT_MODEL=fake:write-file uv run uvicorn app_spark_agent.server.asgi
 
 两条规则值得单独记住：
 
-- **run 结束时有一道屏障**。`finish_response` 里先 `flush`、再释放 `run_guard`，所以「Runtime
-  空闲」就意味着「这一轮已经在控制面上」。flush 超时**不会让 run 失败**——数据还在本地文件
-  里、后台任务会继续重试，落后程度从 `/health` 的 `pushed_*` 能看出来。真正的残余风险是容器
-  在落后期间被回收。
+- **run 结束时有一道屏障，但它只是屏障、不是保证**。`finish_response` 里先 `flush`、再释放
+  `run_guard`。flush 超时**不会让 run 失败**——数据还在本地文件里、后台任务会继续重试——而
+  `run_guard` 照样会释放（控制面挂了不该把会话锁死在下一轮之外）。所以「Runtime 空闲」并不等于
+  「这一轮已经在控制面上」，两个信号要一起看：`/health` 的 `replication_pending` 说的是「还有没
+  推完的东西」，落后多少看 `pushed_*`。真正的残余风险是容器在落后期间被回收。
+- **`flush` 的返回值是「控制面是否真的追平了」**，不是「这一趟有没有报错」。它在 drain 之后比对
+  游标得出结论：一趟干净跑完但仍然落后（比如中途有新 append，或者某个频道的缺口没补上）会返回
+  `False` 并重新举旗，让后台任务接着做。频道缺口在同一趟里就重发补齐，不留给「下一趟」——空闲
+  会话根本没有下一次 append 来触发它。
 - **冷启动要播种 seq，否则会撞号**。全新 Runtime 的 `log.jsonl` 默认从 seq 1 开始，会撞上控制面
   里已有的 1..N。所以 `PUT /context` 带 `?log_seq=40&ui_event_seq=55`，`AppendLog` 以此为
   `base_seq`，第一条 append 变成 41。游标走 query 参数而不是 body，是因为 body 必须原样保持
@@ -129,8 +134,9 @@ curl -N http://127.0.0.1:8765/runs \
 ## 游标接口
 
 以下接口是提供给外部访问会话状态的通道：`/health` 报三份状态的当前游标、运行标志，以及
-`pushed_*` 复制游标（配了控制面才有意义），`/log` 与 `/ui-events` 按游标增量读取两条日志，
-`/context` 导出当前上下文（也可向空 Runtime 注入冷会话上下文并播种 seq）。
+`pushed_*` 复制游标与 `replication_pending`（都只在配了控制面时才有意义），`/log` 与
+`/ui-events` 按游标增量读取两条日志，`/context` 导出当前上下文（也可向空 Runtime 注入冷会话
+上下文并播种 seq）。
 
 > 具体参数与返回结构以代码实现为准。
 

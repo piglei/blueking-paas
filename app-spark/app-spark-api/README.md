@@ -100,8 +100,16 @@ Runtime 是可丢弃的，所以会话历史的权威副本在本服务这边。
 
 **一致性是最终一致的**：Runtime 是在把 AG-UI 事件流全部发完之后才 flush 的，所以客户端收到
 `RUN_FINISHED` 的那一刻，本服务的库可能还差几十毫秒。要等一轮真正落定，看
-`GET .../conversations/<n>/` 的 `running` 是否回到 `false`——Runtime 是先 flush 再释放 run guard 的。
+`GET .../conversations/<n>/` 的 `running` 与 `replication_pending` 是否**都**回到 `false`。
+
+只看 `running` 不够。Runtime 确实是先 flush 再释放 run guard，但 flush 超时不会让这一轮失败——
+数据还在 Runtime 的本地文件里、后台任务会继续重试——run guard 照样会释放。于是完全可能出现
+「Runtime 空闲，但库里还差一截」。`replication_pending` 报的就是那一截，落后到什么程度可以从
+Runtime 的 `/health` 的 `pushed_*` 游标看。
 
 **已知缺口**：冷启动不恢复 workspace 源码。恢复出来的上下文会引用一堆不存在的文件，所以
 「换一个全新 Runtime 继续对话」目前只在讨论层面成立，不在继续编码层面成立。衔接点是
 `ProjectSourceStorage`：注入 context 之前先把源码 `get()` 回来。
+
+另一个缺口是目前没有任何对外接口会终止 Runtime，所以上面那套吊销机制装好了但还没有调用点；
+真正开始回收 Runtime（尤其换成沙箱之后）时，回收路径必须走 `terminate_runtime()`。

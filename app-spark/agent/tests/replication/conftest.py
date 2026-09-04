@@ -33,6 +33,11 @@ class FakeControlPlane:
     :param truncate_to: Channels this endpoint should *lose* entries above the given sequence
         number on every write, which is the one thing that can legitimately move its answer
         backwards.
+    :param truncate_once: The same, but only on the next write to that channel -- a control
+        plane that dropped one batch and then recovered, which is what a re-send has to repair.
+    :param context_ceiling: Highest context version this endpoint admits to holding, whatever it
+        is sent. Stages a control plane whose archive did not move, which the replicator has to
+        believe over its own version number.
     """
 
     channels: dict[str, list[dict[str, Any]]] = field(
@@ -42,6 +47,8 @@ class FakeControlPlane:
     calls: list[tuple[str, int]] = field(default_factory=list[tuple[str, int]])
     failures: int = 0
     truncate_to: dict[str, int] = field(default_factory=dict[str, int])
+    truncate_once: dict[str, int] = field(default_factory=dict[str, int])
+    context_ceiling: int | None = None
 
     def last_seq(self, channel: str) -> int:
         """Return the highest sequence number held for a channel, the way ingest reports it."""
@@ -70,8 +77,13 @@ class FakeControlPlane:
             return httpx.Response(HTTPStatus.SERVICE_UNAVAILABLE, text="try again")
 
         if name == "context":
+            version = int(body["context_version"])
+            if self.context_ceiling is not None and version > self.context_ceiling:
+                # Refused rather than archived, the way a control plane that already holds a
+                # newer document answers: it reports what it kept, not what it was handed.
+                return httpx.Response(HTTPStatus.OK, json={"context_version": self.context_ceiling})
             self.context = body
-            return httpx.Response(HTTPStatus.OK, json={"context_version": body["context_version"]})
+            return httpx.Response(HTTPStatus.OK, json={"context_version": version})
 
         self._store(name, body["records"])
         return httpx.Response(HTTPStatus.OK, json={"last_seq": self.last_seq(name)})
@@ -82,7 +94,9 @@ class FakeControlPlane:
         held = {int(record["seq"]) for record in stored}
         stored.extend(record for record in records if int(record["seq"]) not in held)
         stored.sort(key=lambda record: int(record["seq"]))
-        ceiling = self.truncate_to.get(channel)
+        # The one-shot ceiling wins while it lasts, so a test can stage "lost this batch, kept
+        # the next one" without having to reach in between two calls the replicator makes.
+        ceiling = self.truncate_once.pop(channel, self.truncate_to.get(channel))
         if ceiling is not None:
             self.channels[channel] = [record for record in stored if int(record["seq"]) <= ceiling]
 

@@ -148,20 +148,50 @@ async def test_a_batch_that_arrives_twice_is_stored_once(
 
 
 async def test_a_control_plane_that_lost_entries_is_sent_them_again(harness: Harness) -> None:
-    """It answers with what it holds, so a cursor that ran ahead of it can be walked back."""
-    harness.control_plane.truncate_to["messages"] = 1
+    """It answers with what it holds, so a cursor that ran ahead of it can be walked back.
+
+    One flush has to be enough. ``finish_response`` calls it exactly once per turn, and an idle
+    conversation produces no further append to wake the background task with -- so a gap left
+    for "the next pass" is a gap that stays open.
+    """
+    harness.control_plane.truncate_once["messages"] = 1
     await harness.transcript.append("run-a", [{"n": 1}, {"n": 2}])
 
     assert await harness.replicator.flush(timeout=FLUSH_TIMEOUT)
 
-    # It accepted the batch but kept only seq 1, so seq 2 is not treated as delivered.
+    assert harness.control_plane.seqs("messages") == [1, 2]
+    assert harness.replicator.pushed_seq(Channel.MESSAGE) == 2
+
+
+async def test_a_flush_that_could_not_close_the_gap_says_so(harness: Harness) -> None:
+    """A control plane that drops every batch it accepts must not be reported as caught up."""
+    harness.control_plane.truncate_to["messages"] = 1
+    await harness.transcript.append("run-a", [{"n": 1}, {"n": 2}])
+
+    assert not await harness.replicator.flush(timeout=FLUSH_TIMEOUT)
+
     assert harness.control_plane.seqs("messages") == [1]
     assert harness.replicator.pushed_seq(Channel.MESSAGE) < 2
+    # The flag is back up, so the background task keeps working at it.
+    assert harness.signal.raised
 
     harness.control_plane.truncate_to.clear()
     assert await harness.replicator.flush(timeout=FLUSH_TIMEOUT)
 
     assert harness.control_plane.seqs("messages") == [1, 2]
+
+
+async def test_a_context_the_control_plane_never_took_is_not_recorded_as_pushed(
+    harness: Harness,
+) -> None:
+    """The context is the whole of what a cold start restores, so its lag has to be reported."""
+    harness.control_plane.context_ceiling = 0
+    await harness.context_store.commit(make_messages("hello"), conversation_id=CONVERSATION_ID)
+
+    assert not await harness.replicator.flush(timeout=FLUSH_TIMEOUT)
+
+    assert harness.replicator.pushed_context_version == 0
+    assert harness.signal.raised
 
 
 # --- The background task -------------------------------------------------------------------

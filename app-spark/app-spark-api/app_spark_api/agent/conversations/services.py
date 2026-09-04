@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import attrs
 from asgiref.sync import sync_to_async
+from django.db.models import F
 
 from app_spark_api.agent.conversations import state
 from app_spark_api.agent.conversations.internal_api import state_ingest_path
@@ -66,6 +67,11 @@ class ConversationState:
     :param log_seq: Last raw transcript sequence number stored here.
     :param ui_event_seq: Last AG-UI event sequence number stored here.
     :param running: Whether a Runtime is up and currently occupied by a run.
+    :param replication_pending: Whether a live Runtime still holds state these cursors do not
+        cover yet. ``running`` alone cannot answer "has this turn landed here": the Runtime
+        releases its run guard even when the end-of-turn flush timed out, so an idle Runtime
+        may still be ahead of this service. ``False`` when no Runtime is up, since there is
+        then nothing left that could still arrive.
     :param model: Model of the live Runtime, or ``None`` when none is up. Nothing here can
         answer it otherwise: the model is the agent's own configuration, not this service's.
     """
@@ -74,6 +80,7 @@ class ConversationState:
     log_seq: int
     ui_event_seq: int
     running: bool
+    replication_pending: bool
     model: str | None
 
 
@@ -104,9 +111,37 @@ async def open_client(conversation: Conversation) -> AgentRuntimeClient:
     handle = await provider.ensure(
         project_id=conversation.project_id,
         conversation_id=str(conversation.id),
-        state_callback=_state_callback(conversation.id),
+        state_callback=_state_callback(conversation),
     )
     return AgentRuntimeClient(handle)
+
+
+async def terminate_runtime(conversation: Conversation) -> None:
+    """Stop a conversation's Runtime and revoke its authority to write any more state.
+
+    The two halves belong together, which is why this exists rather than callers reaching for
+    the provider. Stopping a process is best-effort -- it may already be gone, it may ignore the
+    signal, this service may simply have lost track of it -- whereas revoking the token is not,
+    and it is what actually guarantees nothing more arrives under this conversation's name.
+
+    :param conversation: Conversation whose Runtime should be stopped.
+    """
+    await get_agent_runtime_provider().terminate(str(conversation.id))
+    await revoke_state_access(conversation)
+
+
+async def revoke_state_access(conversation: Conversation) -> None:
+    """Invalidate every state-ingest token minted for this conversation so far.
+
+    Incrementing in the database rather than from a value read into Python, so two concurrent
+    revocations cannot both write the same epoch and leave one of the two token generations
+    still valid.
+
+    :param conversation: Conversation to cut off. Refreshed in place, so the caller can mint a
+        replacement token from it straight afterwards.
+    """
+    await Conversation.objects.filter(pk=conversation.pk).aupdate(state_epoch=F("state_epoch") + 1)
+    await conversation.arefresh_from_db(fields=["state_epoch"])
 
 
 async def get_state(conversation: Conversation) -> ConversationState:
@@ -124,16 +159,19 @@ async def get_state(conversation: Conversation) -> ConversationState:
     handle = await provider.peek(str(conversation.id))
     model: str | None = None
     running = False
+    replication_pending = False
     if handle is not None:
         health = await AgentRuntimeClient(handle).health()
         model = health.model
         running = health.running
+        replication_pending = health.replication_pending
 
     return ConversationState(
         context_version=context_version,
         log_seq=log_seq,
         ui_event_seq=ui_event_seq,
         running=running,
+        replication_pending=replication_pending,
         model=model,
     )
 
@@ -222,15 +260,18 @@ async def _resume_if_cold(
     return attrs.evolve(health, context_version=restored_version)
 
 
-def _state_callback(conversation_id: UUID) -> StateCallback:
+def _state_callback(conversation: Conversation) -> StateCallback:
     """Describe where a Runtime for this conversation should replicate its state.
 
     The path only; the provider adds the host, because only it knows where this service is
     reachable from wherever the Runtime is about to run.
+
+    The token is minted against the conversation's current epoch, so a Runtime spawned after a
+    revocation is authorized while its predecessor stays cut off.
     """
     return StateCallback(
-        path=state_ingest_path(conversation_id),
-        token=mint_state_token(conversation_id),
+        path=state_ingest_path(conversation.id),
+        token=mint_state_token(conversation.id, epoch=conversation.state_epoch),
     )
 
 

@@ -42,8 +42,16 @@ if TYPE_CHECKING:
 SSE_HEADERS = {"Accept": "text/event-stream", "Content-Type": "application/json"}
 
 # A run waits on a model that may be writing files for minutes, so it gets no read timeout at
-# all; every other call is a local cursor read and should fail fast instead of hanging a view.
+# all; `/health` and the drains are local cursor reads and should fail fast instead of hanging
+# a view.
 DEFAULT_TIMEOUT_SECONDS = 10.0
+
+# Restoring a context is the exception: the body is the whole conversation, which can run to
+# several megabytes, and it is written and fsynced on arrival. Kept in step with the agent's own
+# CONTROL_PLANE_TIMEOUT_SECONDS, which is what it allows for the same document in the other
+# direction. Too short here reports a cold start as unreachable while the Runtime is in fact
+# rebasing successfully -- and the run then fails against a Runtime that just took the context.
+CONTEXT_TIMEOUT_SECONDS = 30.0
 
 
 class AgentRun:
@@ -91,7 +99,9 @@ class AgentRuntimeClient:
             ...
 
     :param handle: Where the Runtime is reachable, as its provider reported it.
-    :param timeout_seconds: Timeout for the non-streaming calls.
+    :param timeout_seconds: Timeout for the small non-streaming calls.
+    :param context_timeout_seconds: Timeout for the context restore, which carries a document
+        the other calls do not.
     :param transport: What to send the requests over, defaulting to httpx's own. This is
         httpx's designated seam for replacing the network underneath a client; tests use it to
         stage the malformed answers a healthy Runtime cannot be asked to produce.
@@ -102,10 +112,12 @@ class AgentRuntimeClient:
         handle: AgentRuntimeHandle,
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        context_timeout_seconds: float = CONTEXT_TIMEOUT_SECONDS,
         transport: httpx2.AsyncBaseTransport | None = None,
     ) -> None:
         self.handle = handle
         self._timeout_seconds = timeout_seconds
+        self._context_timeout_seconds = context_timeout_seconds
         self._transport = transport
 
     def _new_http_client(self, timeout: httpx2.Timeout | float) -> httpx2.AsyncClient:
@@ -170,7 +182,7 @@ class AgentRuntimeClient:
         """
         params = {"log_seq": log_seq, "ui_event_seq": ui_event_seq}
         try:
-            async with self._new_http_client(self._timeout_seconds) as client:
+            async with self._new_http_client(self._context_timeout_seconds) as client:
                 response = await client.put(
                     "/context",
                     params=params,

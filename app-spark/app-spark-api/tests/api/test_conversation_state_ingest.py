@@ -29,9 +29,10 @@ from http import HTTPStatus
 from typing import Any
 
 import pytest
+from asgiref.sync import async_to_sync
 from django.test import Client
 
-from app_spark_api.agent.conversations import state
+from app_spark_api.agent.conversations import services, state
 from app_spark_api.agent.conversations.internal_api import state_ingest_path
 from app_spark_api.agent.conversations.models import Conversation
 from app_spark_api.agent.conversations.tokens import mint_state_token
@@ -86,7 +87,9 @@ class RuntimeCaller:
         self.conversation = conversation
         self.root = state_ingest_path(conversation.id)
         self.client = Client()
-        self.token = mint_state_token(conversation.id) if token is None else token
+        if token is None:
+            token = mint_state_token(conversation.id, epoch=conversation.state_epoch)
+        self.token = token
 
     def post(self, channel: str, records: list[dict[str, Any]]) -> Any:
         return self.client.post(
@@ -185,6 +188,41 @@ def test_a_context_body_that_is_not_an_object_is_refused(runtime: RuntimeCaller)
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+def test_a_context_larger_than_djangos_default_body_limit_is_still_archived(
+    runtime: RuntimeCaller,
+) -> None:
+    """A real context runs to megabytes; Django refuses bodies over 2.5MB unless told otherwise.
+
+    Worth its own test because the failure is silent rather than loud: ``request.body`` raises
+    ``RequestDataTooBig``, the endpoint answers 400, and the Runtime files that under "retry
+    later" and keeps retrying forever. Nothing surfaces except a growing replication lag, and
+    the conversation's only cold-start source never lands.
+    """
+    filler = "x" * (3 * 1024 * 1024)
+    document = {"schema_version": 3, "context_version": 1, "messages": [{"text": filler}]}
+
+    response = runtime.put_context(document)
+
+    assert response.status_code == HTTPStatus.OK, response.content[:200]
+    assert json.loads(response.content) == {"context_version": 1}
+    stored = state.load_context(runtime.conversation.id)
+    assert stored is not None
+    assert stored["messages"][0]["text"] == filler
+
+
+def test_a_message_batch_larger_than_djangos_default_body_limit_is_still_stored(
+    runtime: RuntimeCaller,
+) -> None:
+    """The same limit applies to the append endpoints, which carry whole model messages."""
+    filler = "y" * (1024 * 1024)
+    batch = [{"seq": seq, "run_id": "run-a", "timestamp": TIMESTAMP, "message": {"text": filler}} for seq in (1, 2, 3)]
+
+    response = runtime.post("messages", batch)
+
+    assert response.status_code == HTTPStatus.OK, response.content[:200]
+    assert json.loads(response.content) == {"last_seq": 3}
+
+
 # --- Who is allowed to push ------------------------------------------------------------------
 
 
@@ -205,7 +243,10 @@ def test_a_token_for_another_conversation_cannot_write_into_this_one(
     other_conversation,
 ) -> None:
     """A Runtime that learns somebody else's address still holds only its own token."""
-    caller = RuntimeCaller(other_conversation, token=mint_state_token(conversation.id))
+    caller = RuntimeCaller(
+        other_conversation,
+        token=mint_state_token(conversation.id, epoch=conversation.state_epoch),
+    )
 
     response = caller.post("messages", messages(1))
 
@@ -218,6 +259,32 @@ def test_a_token_for_a_conversation_that_is_gone_writes_nothing(conversation) ->
     conversation.delete()
 
     assert caller.post("messages", messages(1)).status_code == HTTPStatus.NOT_FOUND
+
+
+def test_a_revoked_token_can_no_longer_write(conversation) -> None:
+    """A Runtime this service lost track of keeps a valid signature, so it needs cutting off.
+
+    The process may well still be alive and still pushing -- terminating it is best-effort --
+    which is exactly why the epoch, and not the provider's bookkeeping, is what decides.
+    """
+    stale = RuntimeCaller(conversation)
+    assert stale.post("messages", messages(1)).status_code == HTTPStatus.OK
+
+    async_to_sync(services.revoke_state_access)(conversation)
+
+    assert stale.post("messages", messages(2)).status_code == HTTPStatus.NOT_FOUND
+    assert stale.put_context({"context_version": 1}).status_code == HTTPStatus.NOT_FOUND
+    # Refused, not merely unacknowledged: nothing of the revoked generation got in.
+    assert state.last_seq(conversation.id, state.MESSAGE_CHANNEL) == 1
+
+
+def test_a_replacement_runtime_is_authorized_after_a_revocation(conversation) -> None:
+    """Revoking must cut off the old generation without locking the conversation itself."""
+    async_to_sync(services.revoke_state_access)(conversation)
+
+    fresh = RuntimeCaller(conversation)
+
+    assert fresh.post("messages", messages(1)).status_code == HTTPStatus.OK
 
 
 def test_a_logged_in_user_has_no_reason_to_reach_this_and_cannot(api_client, conversation) -> None:

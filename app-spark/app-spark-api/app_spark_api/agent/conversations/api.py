@@ -128,9 +128,14 @@ async def list_ui_events(
     number: int,
     project_id: str = PROJECT_ID,
     since: int = Query(0, ge=0, description="从这个游标之后开始读"),
-    limit: int | None = Query(None, ge=1, description="每页条数，不传则用 Runtime 的默认值"),
+    limit: int | None = Query(None, ge=1, description="每页条数，不传则用本服务的默认值"),
 ):
-    """SSE 断了以后用来补上错过的事件——事件流本身没有重放能力。"""
+    """SSE 断了以后用来补上错过的事件——事件流本身没有重放能力。
+
+    直接读本服务的库，不会为此拉起 Runtime。代价是最终一致：Runtime 是把事件流发完之后才回写
+    的，所以刚结束的那一轮可能还差一点。要确认是否已经落定，看 `GET .../conversations/<n>/`
+    的 `running` 与 `replication_pending` 是否都是 false。
+    """
     conversation = await _get_conversation(request, project_id, number)
     page = await services.read_ui_events(conversation, since=since, limit=limit)
     return UiEventPageResponse(
@@ -181,4 +186,5 @@ def _to_state(conversation: Conversation, state: ConversationState) -> RuntimeSt
         log_seq=state.log_seq,
         ui_event_seq=state.ui_event_seq,
         running=state.running,
+        replication_pending=state.replication_pending,
     )

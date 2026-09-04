@@ -39,7 +39,11 @@ from ninja.errors import HttpError
 
 from app_spark_api.agent.conversations import state
 from app_spark_api.agent.conversations.models import Conversation
-from app_spark_api.agent.conversations.tokens import InvalidStateToken, read_state_token
+from app_spark_api.agent.conversations.tokens import (
+    InvalidStateToken,
+    StateTokenClaims,
+    read_state_token,
+)
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -59,16 +63,16 @@ CONTEXT_SEGMENT = "context"
 APPEND_MESSAGES_URL_NAME = "internal-append-messages"
 
 
-async def runtime_token_required(request: HttpRequest) -> str | None:
-    """Authenticate a Runtime and hand the operation the conversation its token names.
+async def runtime_token_required(request: HttpRequest) -> StateTokenClaims | None:
+    """Authenticate a Runtime and hand the operation what its token claims.
 
-    Returns the conversation id rather than resolving the row here, so the operation can
-    compare it against its own path parameter. Reading the path from inside an auth callable
-    would mean reaching into the URL resolver, which is both fragile and easy to get subtly
-    wrong -- and getting it wrong here means one conversation writing into another.
+    Returns the claims rather than resolving the row here, so the operation can compare them
+    against its own path parameter. Reading the path from inside an auth callable would mean
+    reaching into the URL resolver, which is both fragile and easy to get subtly wrong -- and
+    getting it wrong here means one conversation writing into another.
 
     :param request: Request being authenticated.
-    :return: The conversation id from the token, or ``None`` to make django-ninja answer 401.
+    :return: The verified claims, or ``None`` to make django-ninja answer 401.
     """
     header = request.headers.get("Authorization", "")
     if not header.startswith(BEARER_PREFIX):
@@ -207,17 +211,23 @@ async def _append(
 
 
 async def _authorized_conversation(request: HttpRequest, conversation_id: UUID) -> Conversation:
-    """Return the conversation, having checked the token was minted for exactly this one.
+    """Return the conversation, having checked the token names exactly this one and is current.
 
     A mismatch is answered as 404 rather than 403: to a Runtime holding someone else's address,
-    "this conversation does not exist for you" is the whole truth, and it leaks nothing.
+    or one whose authority has been revoked, "this conversation does not exist for you" is the
+    whole truth, and it leaks nothing.
     """
     # `request.auth` is what django-ninja stored from the auth callable; Django's own
     # `HttpRequest` knows nothing about it.
-    token_conversation_id = str(request.auth)  # type: ignore[attr-defined]
-    if token_conversation_id != str(conversation_id):
+    claims: StateTokenClaims = request.auth  # type: ignore[attr-defined]
+    if claims.conversation_id != str(conversation_id):
         raise HttpError(HTTPStatus.NOT_FOUND, "No such conversation.")
-    return await aget_object_or_404(Conversation.objects, id=conversation_id)
+    conversation = await aget_object_or_404(Conversation.objects, id=conversation_id)
+    if claims.epoch != conversation.state_epoch:
+        # 这张 token 属于已经被吊销的那一代（比如上一代 Runtime 被显式终止过）。这个 Runtime
+        # 可能还活着、还在推，但它写的已经不是当前这个会话该收的东西了。
+        raise HttpError(HTTPStatus.NOT_FOUND, "No such conversation.")
+    return conversation
 
 
 async def _read_json(request: HttpRequest) -> Any:

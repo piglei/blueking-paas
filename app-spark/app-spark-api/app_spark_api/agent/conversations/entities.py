@@ -37,6 +37,13 @@ class RuntimeStateResponse(Schema):
     log_seq: int = Field(description="原始对话记录的最后一个游标")
     ui_event_seq: int = Field(description="AG-UI 事件历史的最后一个游标")
     running: bool = Field(description="是否有 Runtime 活着且正在执行 run")
+    replication_pending: bool = Field(
+        description=(
+            "是否还有状态留在 Runtime 里没回写过来。要判断某一轮是否真的落库，"
+            "必须 running 与本字段同时为 false——flush 超时也会释放 run guard，"
+            "所以单看 running=false 并不代表这一轮已经在库里"
+        )
+    )
 
 
 class StartRunRequest(Schema):
@@ -50,10 +57,15 @@ class StartRunRequest(Schema):
 
 
 class UiEventPageResponse(Schema):
-    """A page of the AG-UI events a Runtime has already emitted.
+    """A page of the AG-UI events that have been replicated into this service.
 
     This is how a client that lost its SSE connection catches up: the stream itself cannot be
-    replayed, so anything missed has to be read back from the Runtime's own history.
+    replayed, so anything missed has to be read back from the stored history. Read from this
+    service's own tables, never from a Runtime -- a conversation whose Runtime is long gone has
+    to answer this just as well as one still in progress.
+
+    Because replication lands after the event stream ends, the newest events may briefly be
+    missing here. ``RuntimeStateResponse.replication_pending`` is what says so.
     """
 
     since: int = Field(description="本页请求时使用的游标")

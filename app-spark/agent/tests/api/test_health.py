@@ -53,6 +53,9 @@ def test_a_runtime_with_no_control_plane_says_so(api: TestClient) -> None:
     assert reported["pushed_log_seq"] == 0
     assert reported["pushed_ui_event_seq"] == 0
     assert reported["pushed_context_version"] == 0
+    # Not "nothing is pending" so much as "the question does not apply here": with no control
+    # plane the state directory is the whole story, so it can never be behind one.
+    assert reported["replication_pending"] is False
 
 
 def test_a_restored_runtime_reports_the_history_it_inherited_as_replicated(

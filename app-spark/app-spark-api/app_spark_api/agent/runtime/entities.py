@@ -96,6 +96,9 @@ class RuntimeHealth:
     :param log_seq: Last sequence number in the raw transcript.
     :param ui_event_seq: Last sequence number in the AG-UI event history.
     :param running: Whether a run currently occupies the Runtime.
+    :param replication_pending: Whether the Runtime still holds state it has not managed to
+        replicate. Distinct from ``running``: a flush that times out at the end of a turn hands
+        the run guard back anyway, so an idle Runtime can still be ahead of this service.
     """
 
     model: str
@@ -104,6 +107,7 @@ class RuntimeHealth:
     log_seq: int
     ui_event_seq: int
     running: bool
+    replication_pending: bool = False
 
     @classmethod
     def from_payload(cls, payload: Any) -> RuntimeHealth:
@@ -123,6 +127,10 @@ class RuntimeHealth:
                 log_seq=int(payload["log_seq"]),
                 ui_event_seq=int(payload["ui_event_seq"]),
                 running=bool(payload["running"]),
+                # Read leniently, unlike every field above it: a Runtime with no control plane
+                # configured has no answer to give, and treating "did not say" as "nothing
+                # pending" is the truthful reading of that.
+                replication_pending=bool(payload.get("replication_pending", False)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise AgentUnavailableError(f"Unreadable /health response: {exc}") from exc

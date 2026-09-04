@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
@@ -25,6 +26,8 @@ from app_spark_agent.state import (
     CursorStateError,
 )
 from app_spark_agent.ui_events import record_ui_events
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -59,8 +62,14 @@ async def health(runtime: RuntimeDep) -> dict[str, object]:
     The ``pushed_*`` cursors are what tells the control plane whether this Runtime is safe to
     discard. They read ``0`` for a Runtime with no control plane configured, where the question
     does not apply.
+
+    ``replication_pending`` is the same question already answered: ``running`` going false only
+    means no run holds the guard, *not* that the turn reached the control plane, because a flush
+    that times out still hands the guard back. A caller waiting for a turn to be durable
+    elsewhere has to see both flags down.
     """
     context = runtime.context_store.context
+    replicator = runtime.replicator
     return {
         "status": "ok",
         "model": settings.MODEL,
@@ -69,7 +78,8 @@ async def health(runtime: RuntimeDep) -> dict[str, object]:
         "log_seq": runtime.transcript.last_seq,
         "ui_event_seq": runtime.ui_events.last_seq,
         "running": runtime.run_guard.busy,
-        "replicating": runtime.replicator is not None,
+        "replicating": replicator is not None,
+        "replication_pending": replicator is not None and bool(replicator.outstanding()),
         "pushed_log_seq": runtime.cursors.channel(Channel.MESSAGE).pushed_seq,
         "pushed_ui_event_seq": runtime.cursors.channel(Channel.UI_EVENT).pushed_seq,
         "pushed_context_version": runtime.cursors.pushed_context_version,
@@ -181,7 +191,16 @@ async def run(request: Request, runtime: RuntimeDep) -> Response:
             # inside the same `try` as the rest of the teardown, and deliberately not able to
             # fail the turn -- `flush_replication` reports lag rather than raising, because the
             # client has already been sent every event and the entries are still durable here.
-            await runtime.flush_replication()
+            #
+            # The guard is handed back either way: a control plane that is down must not lock a
+            # conversation out of its next turn. That is why the barrier cannot be the only
+            # signal -- `/health` reports `replication_pending` so a caller can tell "idle" from
+            # "idle and safe to discard", which are not the same thing when this returns false.
+            if not await runtime.flush_replication():
+                logger.warning(
+                    "releasing the run guard while the control plane is still behind; "
+                    "this Runtime is not safe to discard yet"
+                )
         finally:
             runtime.run_guard.release()
 

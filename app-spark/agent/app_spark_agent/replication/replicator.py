@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 # Deliberately narrow: a bug in this module should surface as a traceback, not as silent lag.
 _RECOVERABLE = (ControlPlaneError, AppendLogError, CursorStateError)
 
+# How many times one channel may rewind within a single drain pass. A rewind means the control
+# plane held less than it just accepted, and one re-send is what repairs that. A channel that
+# keeps rewinding is talking to a control plane that is dropping what it accepts, so re-sending
+# in a tight loop would spin instead of converging -- better to fail the pass and let the
+# backoff decide when to try again.
+_MAX_REWINDS_PER_PASS = 2
+
 
 class StateReplicator:
     """Push the three durable channels to the control plane, behind the run.
@@ -145,6 +152,11 @@ class StateReplicator:
         retrying -- but it does mean the control plane is behind, which the caller should make
         visible rather than swallow.
 
+        The answer is decided by comparing cursors after the pass, not by "the pass raised
+        nothing". A drain can finish cleanly and still be behind -- an append that lands
+        mid-drain is the ordinary case -- and reporting that as success is exactly the claim
+        that would strand a turn on a Runtime about to be thrown away.
+
         :param timeout: How long to keep trying before giving up on this attempt.
         :return: Whether every channel is now replicated.
         """
@@ -155,11 +167,39 @@ class StateReplicator:
                     # to leave the flag raised for the background task to pick up.
                     self._signal.clear()
                     await self._drain_all()
-            return True
         except (TimeoutError, *_RECOVERABLE) as exc:
             logger.warning("the control plane is behind after a flush attempt: %s", exc)
             self._signal.notify()
             return False
+
+        outstanding = self.outstanding()
+        if not outstanding:
+            return True
+        # Drained without error and still behind. Raise the flag before reporting it: nothing
+        # else will, and an idle conversation has no next append to wake the background task.
+        logger.warning("the control plane is still behind after a clean flush: %s", outstanding)
+        self._signal.notify()
+        return False
+
+    def outstanding(self) -> dict[str, str]:
+        """Describe what the control plane is still missing, empty when it holds everything.
+
+        A description rather than a bool because both callers need the detail: the log line in
+        :meth:`flush` has to say *what* is behind, and a control plane reporting replication lag
+        to its own clients should not have to re-derive it.
+
+        :return: One entry per channel that is behind, keyed by the channel's name.
+        """
+        behind: dict[str, str] = {}
+        for channel, log in self._channels.items():
+            pushed = self._cursors.channel(channel).pushed_seq
+            if pushed < log.last_seq:
+                behind[str(channel)] = f"pushed seq {pushed} of {log.last_seq}"
+        version = self._context_store.context.context_version
+        pushed_version = self._cursors.pushed_context_version
+        if pushed_version < version:
+            behind["context"] = f"pushed version {pushed_version} of {version}"
+        return behind
 
     async def _loop(self) -> None:
         """Drain whenever the state changes, backing off after a failed pass."""
@@ -190,11 +230,17 @@ class StateReplicator:
         await self._drain_context()
 
     async def _drain_channel(self, channel: Channel, log: AppendLog) -> None:
-        """Push one channel's unsent entries, batch by batch."""
+        """Push one channel's unsent entries, batch by batch.
+
+        A rewind is repaired within this same loop rather than deferred. Returning early would
+        leave a hole open in the middle of a channel this pass is about to report as drained,
+        and for a conversation that has gone idle there is no next append to trigger a retry.
+        """
         if channel not in self._offsets:
             pushed_seq = self._cursors.channel(channel).pushed_seq
             self._offsets[channel] = await asyncio.to_thread(log.offset_after, pushed_seq)
 
+        rewinds = 0
         while True:
             page = await asyncio.to_thread(log.read_from, self._offsets[channel], self._batch_size)
             if not page.records:
@@ -204,7 +250,23 @@ class StateReplicator:
             if acknowledged < sent_through:
                 # The control plane holds less than it just accepted, so its copy of this
                 # channel was truncated behind our back. Rewind to what it admits to having and
-                # let the next pass re-send the gap; claiming success here would strand it.
+                # re-send the gap below; claiming success here would strand it.
+                if acknowledged < log.base_seq:
+                    # The hole is below this file's first entry, so it is in history an earlier
+                    # incarnation wrote and this Runtime simply does not hold. Nothing here can
+                    # repair it, and pretending otherwise would re-send the same batch forever.
+                    raise ControlPlaneError(
+                        f"the control plane is missing {channel} entries up to seq "
+                        f"{acknowledged}, which this Runtime's log begins after (base seq "
+                        f"{log.base_seq})"
+                    )
+                rewinds += 1
+                if rewinds > _MAX_REWINDS_PER_PASS:
+                    raise ControlPlaneError(
+                        f"the control plane rewound {channel} {rewinds} times in one pass, "
+                        f"last reporting seq {acknowledged} after accepting seq {sent_through}; "
+                        "it is not keeping what it accepts"
+                    )
                 logger.warning(
                     "the control plane reports %s only up to seq %d after accepting seq %d; "
                     "rewinding to re-send the gap",
@@ -213,7 +275,7 @@ class StateReplicator:
                     sent_through,
                 )
                 self._offsets[channel] = await asyncio.to_thread(log.offset_after, acknowledged)
-                return
+                continue
             self._offsets[channel] = page.next_offset
             await self._cursors.record_push(channel, seq=sent_through)
 
@@ -228,5 +290,17 @@ class StateReplicator:
         if version <= self._cursors.pushed_context_version:
             return
         payload: dict[str, Any] = await asyncio.to_thread(context.as_payload)
-        await self._client.put_context(payload)
+        acknowledged = await self._client.put_context(payload)
+        if acknowledged < version:
+            # It answered with an older version than the one just sent, so its archive is not
+            # what this Runtime holds. Recording the local number would claim a cold start can
+            # restore a document the control plane never took.
+            #
+            # Raised rather than logged and skipped: a pass that returns normally while still
+            # behind is a pass nothing will retry, because the background task parks on the
+            # change signal and an idle conversation raises it no further.
+            raise ControlPlaneError(
+                f"the control plane reports context version {acknowledged} after being sent "
+                f"version {version}; it did not archive the document"
+            )
         await self._cursors.record_context_push(version)

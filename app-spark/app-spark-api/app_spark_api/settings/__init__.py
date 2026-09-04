@@ -259,6 +259,11 @@ AGENT_CONTEXT_STORAGE = settings.get(
     {"backend": "host_tmp_path", "root": "/tmp/app-spark/agent-contexts"},
 )
 
+## 请求体读入内存的上限（字节）。必须调高：Runtime 回写状态走的是普通 JSON 请求体，而一份
+## context 的压缩预算是 480,000 token（见 agent 侧 COMPACTION_TARGET_TOKENS），序列化之后远超
+## Django 默认的 2.5MB。
+DATA_UPLOAD_MAX_MEMORY_SIZE = settings.get("DATA_UPLOAD_MAX_MEMORY_SIZE", 64 * 1024 * 1024)
+
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.2/howto/static-files/
