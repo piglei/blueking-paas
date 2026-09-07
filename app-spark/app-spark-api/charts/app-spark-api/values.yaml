@@ -29,7 +29,8 @@ ingress:
   enabled: true
   # 显式指定时优先于 annotations 中的 kubernetes.io/ingress.class。
   # ingressClass: ""
-  # 通过 ingress-nginx 转发 /api-svc/ 下的请求，并去掉该前缀。
+  # 外部访问前缀。Ingress 匹配该前缀并 rewrite 去掉；须与 django.forceScriptName 一致。
+  pathPrefix: /api-svc
   host: app-spark-api.example.com
   # annotations 和 tls 支持 Helm 模板表达式（例如 {{ .Release.Name }}）。
   annotations:
@@ -87,6 +88,8 @@ django:
   # bkCookieDomain: null
   # dataUploadMaxMemorySize: 67108864
   # staticUrl: /static/
+  # 与 ingress.pathPrefix 保持一致。部署在站点根路径时设为 null 或 ""。
+  forceScriptName: /api-svc
 
 # 使用外部 MySQL 8.x+，不安装数据库，也不检测 MariaDB 是否存在。
 externalDatabase:

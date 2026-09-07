@@ -53,6 +53,13 @@ def test_ingress_backend_uses_stable_api(kube_version, service_port):
     assert ingress["metadata"]["annotations"]["nginx.ingress.kubernetes.io/rewrite-target"] == "/$2"
 
 
+@pytest.mark.parametrize("path_prefix", ["/api-svc", "/api-svc/", "/custom-svc"])
+def test_ingress_path_follows_path_prefix(path_prefix):
+    ingress = _render({"ingress.pathPrefix": path_prefix})["Ingress"]
+    expected_prefix = path_prefix.rstrip("/")
+    assert ingress["spec"]["rules"][0]["http"]["paths"][0]["path"] == f"{expected_prefix}(/|$)(.*)"
+
+
 @pytest.mark.parametrize("ingress_class", [None, "nginx"])
 def test_explicit_ingress_class_supersedes_legacy_annotation(ingress_class):
     overrides = {"ingress.annotations.kubernetes\\.io/ingress\\.class": "legacy"}

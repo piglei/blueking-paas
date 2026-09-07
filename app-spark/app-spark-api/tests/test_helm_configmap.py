@@ -31,6 +31,14 @@ def test_default_configmap_omits_optional_settings():
     assert "APP_SPARK_API_DATABASE_HOST" in data
     assert "APP_SPARK_API_BKAUTH_TOKEN_APP_CODE" in data
     assert "APP_SPARK_API_AGENT_RUNTIME_PROVIDER_CONFIG" in data
+    assert "APP_SPARK_API_FORCE_SCRIPT_NAME" in data
+
+
+def test_default_force_script_name_matches_ingress_prefix(monkeypatch):
+    data = _render_configmap()
+    monkeypatch.setenv("CHART_TEST_FORCE_SCRIPT_NAME", data["APP_SPARK_API_FORCE_SCRIPT_NAME"])
+    loaded = LazySettings(environments=False, envvar_prefix="CHART_TEST", settings_files=[])
+    assert loaded.get("FORCE_SCRIPT_NAME") == "/api-svc"
 
 
 def test_null_groups_and_values_are_omitted():
@@ -47,6 +55,7 @@ def test_null_groups_and_values_are_omitted():
         ("django.dataUploadMaxMemorySize", 0, "DATA_UPLOAD_MAX_MEMORY_SIZE"),
         ("django.secretKey", "", "SECRET_KEY"),
         ("django.allowedHosts", [], "ALLOWED_HOSTS"),
+        ("django.forceScriptName", "/svc", "FORCE_SCRIPT_NAME"),
         ("defaultCacheConfig", {}, "DEFAULT_CACHE_CONFIG"),
         ("django.languageCode", "en", "LANGUAGE_CODE"),
         ("externalDatabase.password", "00123", "DATABASE_PASSWORD"),
@@ -61,9 +70,10 @@ def test_explicit_values_survive_dynaconf(monkeypatch, key, value, setting):
 
 
 def test_null_leaf_preserves_application_fallback(monkeypatch):
-    data = _render_configmap({"django.secretKey": None, "django.languageCode": None})
+    data = _render_configmap({"django.secretKey": None, "django.languageCode": None, "django.forceScriptName": None})
     assert "APP_SPARK_API_SECRET_KEY" not in data
     assert "APP_SPARK_API_LANGUAGE_CODE" not in data
+    assert "APP_SPARK_API_FORCE_SCRIPT_NAME" not in data
     for key, value in data.items():
         if key.startswith("APP_SPARK_API_"):
             monkeypatch.setenv(key.replace("APP_SPARK_API_", "CHART_TEST_", 1), value)

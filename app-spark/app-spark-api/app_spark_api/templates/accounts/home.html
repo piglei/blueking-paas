@@ -46,10 +46,9 @@
     </main>
 
     <script>
-        // Ingress may strip a service prefix; keep it when the browser calls the API.
-        // Normalize the home URL so both /api-svc and /api-svc/ use the same base.
-        const serviceBaseUrl = new URL(window.location.pathname.replace(/\/?$/, "/"), window.location.origin);
-        const apiUserinfoUrl = new URL("{{ api_userinfo_url|escapejs }}".replace(/^\/+/, ""), serviceBaseUrl);
+        // reverse_public() already includes FORCE_SCRIPT_NAME, so this is the public path
+        // even when Ingress strips the prefix before Django sees the request.
+        const apiUserinfoUrl = new URL("{{ api_userinfo_url|escapejs }}", window.location.origin);
         const defaultLoginUrl = "{{ default_login_url|escapejs }}";
 
         function isSafeHttpUrl(url) {

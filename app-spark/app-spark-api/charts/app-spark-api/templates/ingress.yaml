@@ -1,6 +1,7 @@
 {{- if .Values.ingress.enabled }}
 {{- $supportsClassName := eq "true" (include "common.ingress.supportsIngressClassname" .) }}
 {{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- $pathPrefix := trimSuffix "/" (.Values.ingress.pathPrefix | default "/api-svc") }}
 {{/* An explicit class takes precedence; preserve annotation-only configurations. */}}
 {{- if .Values.ingress.ingressClass }}
   {{- if $supportsClassName }}
@@ -31,7 +32,7 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          - path: /api-svc(/|$)(.*)
+          - path: {{ $pathPrefix }}(/|$)(.*)
             {{- if eq "true" (include "common.ingress.supportsPathType" .) }}
             pathType: ImplementationSpecific
             {{- end }}
