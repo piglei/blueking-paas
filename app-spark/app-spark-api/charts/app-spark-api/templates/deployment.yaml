@@ -24,17 +24,18 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/general-envs-configmap.yaml") . | sha256sum }}
     spec:
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      {{- $images := list .Values.image }}
+      {{- if .Values.migrate.enabled }}
+        {{- $images = append $images .Values.utility.images.k8sWaitFor }}
       {{- end }}
+      {{- include "app-spark-api.imagePullSecrets" (dict "images" $images "context" $) | nindent 6 }}
       terminationGracePeriodSeconds: 60
       {{- if .Values.migrate.enabled }}
       serviceAccountName: {{ include "app-spark-api.fullname" . }}
       initContainers:
         # Only the revision's Job performs migrations; API startup waits for its success.
         - name: wait-for-migrate
-          image: {{ printf "%s:%s" .Values.utility.images.k8sWaitFor.repository .Values.utility.images.k8sWaitFor.tag | quote }}
+          image: {{ include "common.images.image" (dict "imageRoot" .Values.utility.images.k8sWaitFor "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.utility.images.k8sWaitFor.pullPolicy | default "IfNotPresent" }}
           args:
             - job

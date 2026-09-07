@@ -1,11 +1,21 @@
 # 当前 local_process provider 在进程内维护 Runtime，只支持单副本、单 worker。
 replicaCount: 1
 
+# 可统一指定 API 和等待迁移镜像的仓库、拉取凭据。
+# global:
+#   imageRegistry: ""
+#   imagePullSecrets: []
+
 image:
   # 替换为实际镜像；镜像要求见 README.md。
+  # registry: ""
   repository: app-spark-api
   # pullPolicy: IfNotPresent
   tag: ""
+  # digest 优先于 tag；pullSecrets 支持名称字符串或 {name: ...}。
+  # digest: ""
+  # pullSecrets: []
+# Pod 级拉取凭据，兼容已有配置，并与 global、各镜像的 pullSecrets 合并去重。
 # imagePullSecrets: []
 
 # nameOverride: ""
@@ -17,9 +27,14 @@ service:
 
 ingress:
   enabled: true
+  # 显式指定时优先于 annotations 中的 kubernetes.io/ingress.class。
   # ingressClass: ""
+  # 通过 ingress-nginx 转发 /api-svc/ 下的请求，并去掉该前缀。
   host: app-spark-api.example.com
+  # annotations 和 tls 支持 Helm 模板表达式（例如 {{ .Release.Name }}）。
   annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
     # 会话接口使用 SSE，关闭缓冲并允许长连接。
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
@@ -39,8 +54,11 @@ migrate:
 utility:
   images:
     k8sWaitFor:
+      # registry: ""
       repository: groundnuty/k8s-wait-for
       tag: v1.5.1
+      # digest: ""
+      # pullSecrets: []
       # pullPolicy: IfNotPresent
   # resources: {}
 

@@ -46,7 +46,10 @@
     </main>
 
     <script>
-        const apiUserinfoUrl = "{{ api_userinfo_url|escapejs }}";
+        // Ingress may strip a service prefix; keep it when the browser calls the API.
+        // Normalize the home URL so both /api-svc and /api-svc/ use the same base.
+        const serviceBaseUrl = new URL(window.location.pathname.replace(/\/?$/, "/"), window.location.origin);
+        const apiUserinfoUrl = new URL("{{ api_userinfo_url|escapejs }}".replace(/^\/+/, ""), serviceBaseUrl);
         const defaultLoginUrl = "{{ default_login_url|escapejs }}";
 
         function isSafeHttpUrl(url) {

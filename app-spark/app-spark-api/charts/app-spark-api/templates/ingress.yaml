@@ -1,31 +1,40 @@
 {{- if .Values.ingress.enabled }}
-apiVersion: networking.k8s.io/v1
+{{- $supportsClassName := eq "true" (include "common.ingress.supportsIngressClassname" .) }}
+{{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{/* An explicit class takes precedence; preserve annotation-only configurations. */}}
+{{- if .Values.ingress.ingressClass }}
+  {{- if $supportsClassName }}
+    {{- $annotations = omit $annotations "kubernetes.io/ingress.class" }}
+  {{- else }}
+    {{- $_ := set $annotations "kubernetes.io/ingress.class" .Values.ingress.ingressClass }}
+  {{- end }}
+{{- end }}
+apiVersion: {{ include "common.capabilities.ingress.apiVersion" . }}
 kind: Ingress
 metadata:
   name: {{ include "app-spark-api.fullname" . }}
   labels:
     {{- include "app-spark-api.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- with $annotations }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- include "common.tplvalues.render" (dict "value" . "context" $) | nindent 4 }}
   {{- end }}
 spec:
-  {{- with .Values.ingress.ingressClass }}
-  ingressClassName: {{ . | quote }}
+  {{- if and $supportsClassName .Values.ingress.ingressClass }}
+  ingressClassName: {{ .Values.ingress.ingressClass | quote }}
   {{- end }}
   {{- with .Values.ingress.tls }}
   tls:
-    {{- toYaml . | nindent 4 }}
+    {{- include "common.tplvalues.render" (dict "value" . "context" $) | nindent 4 }}
   {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          - path: /
-            pathType: Prefix
+          - path: /api-svc(/|$)(.*)
+            {{- if eq "true" (include "common.ingress.supportsPathType" .) }}
+            pathType: ImplementationSpecific
+            {{- end }}
             backend:
-              service:
-                name: {{ include "app-spark-api.fullname" . }}
-                port:
-                  number: {{ .Values.service.port }}
+              {{- include "common.ingress.backend" (dict "serviceName" (include "app-spark-api.fullname" .) "servicePort" (.Values.service.port | int) "context" $) | nindent 14 }}
 {{- end }}

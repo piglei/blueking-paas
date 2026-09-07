@@ -1,35 +1,30 @@
 {{/* Keep resource names and selectors consistent with the reference chart. */}}
 {{- define "app-spark-api.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- include "common.names.name" . -}}
 {{- end -}}
 
 {{- define "app-spark-api.fullname" -}}
-{{- if .Values.fullnameOverride -}}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- $name := default .Chart.Name .Values.nameOverride -}}
-{{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-{{- end -}}
+{{- include "common.names.fullname" . -}}
 {{- end -}}
 
 {{- define "app-spark-api.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "app-spark-api.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+{{- include "common.labels.matchLabels" . -}}
 {{- end -}}
 
 {{- define "app-spark-api.labels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-{{ include "app-spark-api.selectorLabels" . }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- include "common.labels.standard" . -}}
 {{- end -}}
 
 {{- define "app-spark-api.image" -}}
-{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{/* common 2.13.3 does not supply an appVersion fallback; preserve the chart's default tag. */}}
+{{- $image := merge (dict "tag" (.Values.image.tag | default .Chart.AppVersion)) .Values.image -}}
+{{- include "common.images.image" (dict "imageRoot" $image "global" .Values.global) -}}
+{{- end -}}
+
+{{/* Keep top-level imagePullSecrets compatible while including only images used by this Pod. */}}
+{{- define "app-spark-api.imagePullSecrets" -}}
+{{- $images := prepend .images (dict "pullSecrets" .context.Values.imagePullSecrets) -}}
+{{- include "common.images.renderPullSecrets" (dict "images" $images "context" .context) -}}
 {{- end -}}
 
 {{/* A fresh Job per Helm revision avoids modifying immutable Job pod templates. */}}

@@ -17,10 +17,7 @@ spec:
     spec:
       restartPolicy: OnFailure
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      {{- include "app-spark-api.imagePullSecrets" (dict "images" (list .Values.image) "context" $) | nindent 6 }}
       containers:
         - name: migrate
           image: {{ include "app-spark-api.image" . | quote }}

@@ -21,10 +21,16 @@ docker push registry.example.com/app-spark-api:0.1.0
 可选业务配置未定义或为 `null` 时沿用应用默认值；显式的 `false`、`0` 和空值仍会生效。
 
 ```bash
+helm dependency build charts/app-spark-api
 helm upgrade --install app-spark-api charts/app-spark-api \
   --namespace app-spark --create-namespace \
   -f values-production.yaml --wait --wait-for-jobs --timeout 6m
 ```
+
+Ingress 依赖 **ingress-nginx**，使用正则路径 `/api-svc(/|$)(.*)` 和重写目标 `/$2`，
+转发时去掉外部 `/api-svc` 前缀。按集群配置设置 `ingress.ingressClass`。
+
+前端服务可在同一域名单独配置 `/` 的 Ingress，无需添加上述重写注解。
 
 ## 数据持久化
 
