@@ -276,6 +276,6 @@ STATIC_ROOT = str(BASE_DIR / "public" / "static")
 # 未显式配置时跟 FORCE_SCRIPT_NAME 走，避免静态资源仍指向站点根路径。
 _static_url = settings.get("STATIC_URL")
 if _static_url is None:
-    STATIC_URL = f"{str(FORCE_SCRIPT_NAME).rstrip('/')}/static/" if FORCE_SCRIPT_NAME else "/static/"
+    STATIC_URL = f"{FORCE_SCRIPT_NAME.rstrip('/')}/static/" if FORCE_SCRIPT_NAME else "/static/"
 else:
     STATIC_URL = _static_url
