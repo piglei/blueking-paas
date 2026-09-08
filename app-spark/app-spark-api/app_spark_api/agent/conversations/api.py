@@ -22,10 +22,11 @@ from typing import TYPE_CHECKING
 from django.http import StreamingHttpResponse
 from django.shortcuts import aget_object_or_404
 from ninja import Path, Query, Router, Status
+from ninja.pagination import paginate
 
 from app_spark_api.agent.conversations import services
 from app_spark_api.agent.conversations.entities import (
-    ErrorResponse,
+    ConversationResponse,
     RuntimeStateResponse,
     StartRunRequest,
     UiEventPageResponse,
@@ -33,6 +34,7 @@ from app_spark_api.agent.conversations.entities import (
 from app_spark_api.agent.conversations.models import Conversation
 from app_spark_api.core.projects.models import Project
 from app_spark_api.core.tenant.user import get_tenant
+from app_spark_api.entities import ErrorResponse
 from app_spark_api.infras.accounts.auth import authenticated_user, login_required
 
 if TYPE_CHECKING:
@@ -72,6 +74,28 @@ async def create_conversation(request: HttpRequest, project_id: str = PROJECT_ID
 
 
 @router.get(
+    "",
+    response=list[ConversationResponse],
+    url_name="conversations-list",
+    summary="列出一个 Project 下的会话",
+)
+@paginate
+async def list_conversations(
+    request: HttpRequest,
+    project_id: str = PROJECT_ID,
+    is_live: bool | None = Query(None, description="只看还活着的（true）或已结束的（false）会话，不传则全都要"),
+):
+    """列出这个 Project 的会话，按创建时间倒序，可按是否还活着（live）过滤。
+
+    「活着」指的是会话还没被结束、还能继续推进，而不是「此刻有没有 Agent Runtime 在跑」。
+    Runtime 是可丢弃的，会被反复回收和重新拉起，那是会话的实现细节而不是会话的状态。
+    """
+    # 返回还没取值的 queryset：`@paginate` 会自己 COUNT 加切片，这里 `async for` 一遍再交出去
+    # 等于把整个列表读进内存，翻页也就白翻了。
+    return Conversation.objects.for_project(await _get_project(request, project_id), is_live=is_live)
+
+
+@router.get(
     "{number}/",
     response=RuntimeStateResponse,
     url_name="conversations-retrieve",
@@ -105,6 +129,7 @@ async def start_run(
     """把用户本轮内容发送给 Agent，并把 AG-UI 的 SSE 事件流原样透传回去。
 
     - client 需要等待每轮会话结束后，再发送新的内容；
+    - 已结束的会话不能再推进，会返回 409。
 
     AG-UI 协议说明：https://github.com/ag-ui-protocol/ag-ui
     """
@@ -121,6 +146,29 @@ async def start_run(
         content_type="text/event-stream",
         headers=SSE_RESPONSE_HEADERS,
     )
+
+
+@router.post(
+    "{number}/close/",
+    response={HTTPStatus.OK: ConversationResponse, HTTPStatus.CONFLICT: ErrorResponse},
+    url_name="conversations-close",
+    summary="结束一个仍然活跃的会话",
+)
+async def close_conversation(
+    request: HttpRequest,
+    number: int,
+    project_id: str = PROJECT_ID,
+):
+    """结束一个会话，并回收它占着的 Agent Runtime。
+
+    - 结束是终态，重复调用会返回 409；
+    - 会话的历史（AG-UI 事件等）不会被删掉，仍然可以读，只是不能再发起新的一轮对话；
+    - 如果此刻正有一轮对话在跑，它会被打断，那条 SSE 流上会收到一个 AG-UI `RUN_ERROR` 事件。
+    """
+    conversation = await _get_conversation(request, project_id, number)
+    # 已经结束的会话会抛 ConversationClosedError，由 `app_spark_api.api` 里的统一处理器翻成 409。
+    await services.close_conversation(conversation)
+    return conversation
 
 
 @router.get(
@@ -185,6 +233,8 @@ def _to_state(conversation: Conversation, state: ConversationState) -> RuntimeSt
     return RuntimeStateResponse(
         number=conversation.number,
         conversation_id=conversation.id,
+        is_live=conversation.is_live,
+        closed_at=conversation.closed_at,
         model=state.model,
         context_version=state.context_version,
         log_seq=state.log_seq,

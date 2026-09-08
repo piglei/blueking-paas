@@ -32,8 +32,10 @@ from typing import TYPE_CHECKING, Any
 import attrs
 from asgiref.sync import sync_to_async
 from django.db.models import F
+from django.utils import timezone
 
 from app_spark_api.agent.conversations import state
+from app_spark_api.agent.conversations.exceptions import ConversationClosedError
 from app_spark_api.agent.conversations.internal_api import state_ingest_path
 from app_spark_api.agent.conversations.models import Conversation
 from app_spark_api.agent.conversations.tokens import mint_state_token
@@ -95,6 +97,44 @@ async def create_conversation(project: Project, *, owner: str | None) -> Convers
     :return: The stored conversation.
     """
     return await sync_to_async(Conversation.objects.create_for_project)(project, owner=owner)
+
+
+async def close_conversation(conversation: Conversation) -> None:
+    """结束一个会话，并回收它占着的 Agent Runtime。
+
+    结束是终态，也是 Runtime 唯一的对外回收入口：会话一旦结束就不再接受新的一轮对话，于是
+    Runtime 连同它占着的 Project workspace 都可以还回去，同一个 Project 的其他会话才能接着用
+    （一个 Project 的 workspace 同时只容得下一个 Runtime，见 ``_reject_workspace_conflict``）。
+
+    如果这一刻正好有一轮对话在跑，它会被打断：客户端那条 SSE 流会收到一个 AG-UI ``RUN_ERROR``
+    事件（见 :func:`stream_run`）。这是有意的——结束会话本来就是「别跑了」的意思。
+
+    :param conversation: 要结束的会话。就地更新 ``closed_at``，调用方拿它直接构造响应即可，
+        不必再回库读一次。
+    :raises ConversationClosedError: 会话已经结束过了。
+    """
+    closed_at = timezone.now()
+
+    # 先落库、再回收 Runtime，而且落库这一步用一条带条件的 UPDATE 而不是「读出来判断一下再写」：
+    #
+    # * 条件写让并发的两个「结束」里只有一个能改到行，另一个拿到 0 行受影响，于是它知道自己
+    #   慢了一步。读-判断-写的话两个都会觉得自己是第一个，各自回一个成功。
+    # * 顺序也不能反。这条 UPDATE 才是真正拦住后续对话的东西（见 :func:`start_run` 的闸门），
+    #   而停进程是尽力而为的——先停进程再落库，中间失败就会留下一个「Runtime 没了但会话还活着」
+    #   的状态，下一轮对话又会把 Runtime 拉起来，等于这次结束什么也没做成。
+    #
+    # `updated` 一并显式写上：`aupdate()` 绕过 `save()`，`auto_now` 不会被触发。
+    changed = (
+        await Conversation.objects.get_queryset()
+        .filter(pk=conversation.pk)
+        .live()
+        .aupdate(closed_at=closed_at, updated=closed_at)
+    )
+    if not changed:
+        raise ConversationClosedError(f"Conversation {conversation.id} has already been closed")
+    conversation.closed_at = closed_at
+
+    await terminate_runtime(conversation)
 
 
 async def open_client(conversation: Conversation) -> AgentRuntimeClient:
@@ -208,10 +248,16 @@ async def start_run(conversation: Conversation, *, content: str) -> AgentRun:
     :param conversation: Conversation the turn belongs to.
     :param content: The user's message.
     :return: The accepted run, whose bytes are still to come.
+    :raises ConversationClosedError: If the conversation has been closed.
     :raises AgentBusyError: If a run is already occupying the Runtime.
     :raises AgentProvisionError: If no Runtime could be brought up.
     :raises AgentUnavailableError: If the Runtime cannot be reached or refuses the turn.
     """
+    # 这道闸门是「结束会话」有意义的前提。没有它，结束一个会话只是杀掉了一个进程：下一轮对话
+    # 会照常把 Runtime 重新拉起来，被回收的 workspace 也会被重新占上。
+    if not conversation.is_live:
+        raise ConversationClosedError(f"Conversation {conversation.id} has been closed and cannot be advanced")
+
     client = await open_client(conversation)
     health = await client.health()
     health = await _resume_if_cold(conversation, client, health)
