@@ -82,7 +82,10 @@ async def get_conversation(
     number: int,
     project_id: str = PROJECT_ID,
 ):
-    """看一眼会话现在到哪儿了，不会为它拉起 Runtime。"""
+    """查看已创建的会话目前的状态，不会触发创建任何 Agent Runtime 逻辑。
+
+    主要用于恢复一个历史会话，client 可根据返回里的状态信息拉取历史 AG-UI 事件。
+    """
     conversation = await _get_conversation(request, project_id, number)
     return _to_state(conversation, await services.get_state(conversation))
 
@@ -99,11 +102,14 @@ async def start_run(
     payload: StartRunRequest,
     project_id: str = PROJECT_ID,
 ):
-    """把用户这一轮的话交给 Agent，并把 AG-UI 的 SSE 事件流原样透传回去。
+    """把用户本轮内容发送给 Agent，并把 AG-UI 的 SSE 事件流原样透传回去。
 
-    透传的是原始字节，而不是 ninja 的 ``SSE[Schema]``：本服务不需要认识 AG-UI 的事件结构，
-    每个 token delta 都做一次 pydantic 校验加 JSON 重新序列化也纯属浪费。
+    - client 需要等待每轮会话结束后，再发送新的内容；
+
+    AG-UI 协议说明：https://github.com/ag-ui-protocol/ag-ui
     """
+    # 透传的是原始字节，而不是 ninja 的 ``SSE[Schema]``：本服务不需要认识 AG-UI 的事件结构，
+    # 每个 token delta 都做一次 pydantic 校验加 JSON 重新序列化也纯属浪费。
     conversation = await _get_conversation(request, project_id, number)
 
     # 所有 ORM 操作都必须在返回 StreamingHttpResponse 之前做完：生成器要跑到 run 结束为止，
@@ -121,21 +127,19 @@ async def start_run(
     "{number}/ui-events/",
     response=UiEventPageResponse,
     url_name="conversations-ui-events",
-    summary="补拉 AG-UI 事件历史",
+    summary="拉取已入库的 AG-UI 事件历史",
 )
 async def list_ui_events(
     request: HttpRequest,
     number: int,
     project_id: str = PROJECT_ID,
     since: int = Query(0, ge=0, description="从这个游标之后开始读"),
-    limit: int | None = Query(None, ge=1, description="每页条数，不传则用本服务的默认值"),
+    limit: int | None = Query(None, ge=1, description="每页条数，默认值 200"),
 ):
-    """SSE 断了以后用来补上错过的事件——事件流本身没有重放能力。
-
-    直接读本服务的库，不会为此拉起 Runtime。代价是最终一致：Runtime 是把事件流发完之后才回写
-    的，所以刚结束的那一轮可能还差一点。要确认是否已经落定，看 `GET .../conversations/<n>/`
-    的 `running` 与 `replication_pending` 是否都是 false。
-    """
+    """拉取已入库的 AG-UI 事件，用于恢复会话后展示历史对话内容，或在 SSE 以外终端后补上事件。"""
+    # 直接读本服务的库，不会为此拉起 Runtime。代价是最终一致：Runtime 是把事件流发完之后才回写
+    # 的，所以刚结束的那一轮可能还差一点。要确认是否已经落定，看 `GET .../conversations/<n>/`
+    # 的 `running` 与 `replication_pending` 是否都是 false。
     conversation = await _get_conversation(request, project_id, number)
     page = await services.read_ui_events(conversation, since=since, limit=limit)
     return UiEventPageResponse(
