@@ -184,7 +184,7 @@ async def list_ui_events(
     since: int = Query(0, ge=0, description="从这个游标之后开始读"),
     limit: int | None = Query(None, ge=1, description="每页条数，默认值 200"),
 ):
-    """拉取已入库的 AG-UI 事件，用于恢复会话后展示历史对话内容，或在 SSE 以外终端后补上事件。"""
+    """拉取已入库的 AG-UI 事件，用于恢复会话后展示历史对话内容，或在 SSE 以外终止后补上事件。"""
     # 直接读本服务的库，不会为此拉起 Runtime。代价是最终一致：Runtime 是把事件流发完之后才回写
     # 的，所以刚结束的那一轮可能还差一点。要确认是否已经落定，看 `GET .../conversations/<n>/`
     # 的 `running` 与 `replication_pending` 是否都是 false。
@@ -199,17 +199,11 @@ async def list_ui_events(
 
 
 async def _get_project(request: HttpRequest, project_id: str) -> Project:
-    """Return a Project the caller is allowed to reach, or raise 404.
-
-    Scoped by tenant, which is the only boundary this project currently encodes. Nothing yet
-    distinguishes members of one tenant from each other.
-
-    TODO: narrow this to the Project's own members once there is a permission model to consult.
-    """
+    """Return a Project the caller is allowed to reach, or raise 404."""
+    user = authenticated_user(request)
     return await aget_object_or_404(
-        Project.objects,
+        Project.objects.owned_by(user.pk, tenant_id=get_tenant(user).id),
         id=project_id,
-        tenant_id=get_tenant(authenticated_user(request)).id,
     )
 
 

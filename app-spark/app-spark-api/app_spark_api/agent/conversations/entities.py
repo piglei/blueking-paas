@@ -75,9 +75,9 @@ class StartRunRequest(Schema):
 
 class UiEventPageResponse(Schema):
     """
-    一页 AG-UI 事件，这些事件都已从 Runtime 持久化到到服务端中。
+    一页 AG-UI 事件，这些事件都已从 Runtime 持久化到服务端中。
 
-    客户端的 SSE 请求终端后基于这这些事件来追赶进度：steam 本身无法重放，因此丢失的东西必须从已
+    客户端的 SSE 请求终止后基于这些事件来追赶进度：stream 本身无法重放，因此丢失的东西必须从已
     落库的历史中重新读回来；读的都是 api 服务端数据库表里的数据，而不是直接从 runtime 里读，因为
     包含历史事件 runtime 可能早就被销毁了。
     """

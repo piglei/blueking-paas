@@ -60,6 +60,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_UI_EVENT_PAGE_SIZE = 200
 MAX_UI_EVENT_PAGE_SIZE = 1_000
 
+_CLOSED_MESSAGE = "Conversation {id} has been closed and cannot be advanced"
+
 
 @attrs.frozen
 class ConversationState:
@@ -157,7 +159,7 @@ async def open_client(conversation: Conversation) -> AgentRuntimeClient:
 
 
 async def terminate_runtime(conversation: Conversation) -> None:
-    """Stop a conversation's Runtime and revoke its authority to write any more state.
+    """Revoke a conversation's authority to write any more state, and stop its Runtime.
 
     The two halves belong together, which is why this exists rather than callers reaching for
     the provider. Stopping a process is best-effort -- it may already be gone, it may ignore the
@@ -166,8 +168,15 @@ async def terminate_runtime(conversation: Conversation) -> None:
 
     :param conversation: Conversation whose Runtime should be stopped.
     """
-    await get_agent_runtime_provider().terminate(str(conversation.id))
     await revoke_state_access(conversation)
+    try:
+        await get_agent_runtime_provider().terminate(str(conversation.id))
+    except Exception:
+        logger.exception(
+            "The Agent Runtime of conversation %s could not be stopped. It can no longer write "
+            "state, but may still be holding this project's workspace.",
+            conversation.id,
+        )
 
 
 async def revoke_state_access(conversation: Conversation) -> None:
@@ -256,12 +265,43 @@ async def start_run(conversation: Conversation, *, content: str) -> AgentRun:
     # 这道闸门是「结束会话」有意义的前提。没有它，结束一个会话只是杀掉了一个进程：下一轮对话
     # 会照常把 Runtime 重新拉起来，被回收的 workspace 也会被重新占上。
     if not conversation.is_live:
-        raise ConversationClosedError(f"Conversation {conversation.id} has been closed and cannot be advanced")
+        raise ConversationClosedError(_CLOSED_MESSAGE.format(id=conversation.id))
 
     client = await open_client(conversation)
+    await _reject_if_closed_meanwhile(conversation)
     health = await client.health()
     health = await _resume_if_cold(conversation, client, health)
     return await client.start_run(content=content, context_version=health.context_version)
+
+
+async def _reject_if_closed_meanwhile(conversation: Conversation) -> None:
+    """Runtime 拉起来之后，回库再确认一次这个会话还活着。
+
+    :func:`start_run` 开头那道闸门看的是请求进来时读到的那一行，而 :func:`open_client` 要花上
+    好几秒才回来。这中间足够另一个请求把会话结束掉，于是这一轮会为一个已经结束的会话拉起
+    Runtime：刚交还的 Project workspace 又被占上（同一个 Project 的下一个会话于是开不起来），
+    而它手里那张回写 token 已经被 close 吊销了——这一轮跑得成功，却什么都写不回来。
+
+    检查放在 ``open_client()`` **之后**才兜得住，因为两边的顺序正好相反：close 是先落库、
+    再收 Runtime，这里是先拉起 Runtime（provider 里已经登记）、再回库读。于是不管这两个请求
+    怎么交错，总有一边能看见对方：
+
+    * close 的 UPDATE 落在这次读之前——这里读到「已结束」，Runtime 由这里收掉；
+    * close 的 UPDATE 落在这次读之后——那它的 terminate 必然晚于上面的 ``ensure()``，能在
+      provider 里找到这个 Runtime，由 close 收掉。
+
+    :param conversation: 要确认的会话。
+    :raises ConversationClosedError: 会话在这期间被结束了。抛出之前会先把 Runtime 收掉。
+    """
+    if await Conversation.objects.get_queryset().filter(pk=conversation.pk).live().aexists():
+        return
+
+    logger.warning(
+        "Conversation %s was closed while its Agent Runtime was coming up, taking the Runtime back down",
+        conversation.id,
+    )
+    await terminate_runtime(conversation)
+    raise ConversationClosedError(_CLOSED_MESSAGE.format(id=conversation.id))
 
 
 async def _resume_if_cold(

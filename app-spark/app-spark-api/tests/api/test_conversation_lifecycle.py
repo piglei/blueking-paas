@@ -29,11 +29,14 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import pytest
+from django.utils import timezone
 
 from app_spark_api.agent.conversations import services
 from app_spark_api.agent.conversations.models import Conversation
+from app_spark_api.agent.runtime import get_agent_runtime_provider
 from app_spark_api.core.projects.models import Project
 from app_spark_api.core.tenant.user import get_tenant
+from tests.helpers import create_user
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -166,6 +169,54 @@ async def test_a_project_nobody_in_this_tenant_owns_is_not_found(aapi_client, bk
     assert response.status_code == HTTPStatus.NOT_FOUND
 
 
+# --- reaching someone else's conversations ----------------------------------------------
+
+
+@pytest.fixture
+async def someone_elses_conversation(bk_user) -> Conversation:
+    """A conversation of a Project that another user of the *same* tenant owns."""
+    project = await make_project(
+        project_id="not-mine",
+        name="Not Mine",
+        owner=create_user(),
+        tenant_id=get_tenant(bk_user).id,
+    )
+    return await make_conversation(project, owner="somebody-else")
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", ""),
+        # Creating is in here too: it is the one read that provisions a Runtime, so reaching it
+        # would spend someone else's workspace as well as look at their Project.
+        ("post", ""),
+        ("get", "{number}/"),
+        ("get", "{number}/ui-events/"),
+        ("post", "{number}/close/"),
+    ],
+)
+async def test_no_conversation_endpoint_reaches_another_users_project(
+    aapi_client,
+    someone_elses_conversation,
+    method,
+    path,
+):
+    """A tenant is not a boundary between users, so it cannot be the only thing checked.
+
+    Closing is the reason this matters beyond privacy: it terminates a Runtime mid-run and hands
+    back the workspace, so it would let anyone in the tenant destroy anyone else's work in
+    progress by guessing nothing more than a ``project_id``.
+    """
+    url = f"/api/projects/not-mine/conversations/{path.format(number=someone_elses_conversation.number)}"
+
+    response = await getattr(aapi_client, method)(url)
+
+    assert response.status_code == HTTPStatus.NOT_FOUND
+    await someone_elses_conversation.arefresh_from_db()
+    assert someone_elses_conversation.is_live
+
+
 # --- telling live from closed -----------------------------------------------------------
 
 
@@ -237,6 +288,75 @@ async def test_ending_a_conversation_revokes_its_runtimes_authority_to_write(aap
 
     await aapi_client.post(close_url(conversation.number))
 
+    await conversation.arefresh_from_db()
+    assert conversation.state_epoch == epoch_before + 1
+
+
+async def test_a_runtime_that_refuses_to_stop_still_loses_its_authority_to_write(
+    aapi_client,
+    conversation,
+    monkeypatch,
+):
+    """The half of the cleanup that has to land even when the other half fails.
+
+    Stopping a process is best-effort, revoking is not -- and there is no second close to fall
+    back on, since a repeat is refused. So a provider that cannot stop its Runtime must not be
+    able to take the revocation down with it, or a Runtime nobody can reach would go on writing
+    into a conversation that has already ended.
+    """
+
+    async def refuse_to_stop(conversation_id: str) -> None:
+        raise RuntimeError("the Runtime is not listening")
+
+    monkeypatch.setattr(get_agent_runtime_provider(), "terminate", refuse_to_stop)
+    epoch_before = conversation.state_epoch
+
+    response = await aapi_client.post(close_url(conversation.number))
+
+    assert response.status_code == HTTPStatus.OK
+    await conversation.arefresh_from_db()
+    assert conversation.closed_at is not None
+    assert conversation.state_epoch == epoch_before + 1
+
+
+async def test_a_conversation_closed_while_its_runtime_comes_up_does_not_keep_it(
+    aapi_client,
+    conversation,
+    monkeypatch,
+):
+    """The window between the gate on the run path and a Runtime actually being up.
+
+    Bringing one up takes seconds, which is easily long enough for a close to land in the
+    middle. Without a second check the closed conversation would come back with a Runtime
+    holding the very workspace the close just handed back -- and one whose write-back token the
+    close has already revoked, so the turn would run and then quietly fail to store anything.
+    """
+    terminated: list[str] = []
+
+    async def close_it_behind_our_back(target: Conversation) -> object:
+        """Stand in for a concurrent close that lands after the gate has let this run past."""
+        await Conversation.objects.filter(pk=target.pk).aupdate(closed_at=timezone.now())
+        # The run is meant to be rejected before anything touches the client, so what this
+        # hands back only has to be an object.
+        return object()
+
+    async def record_terminate(conversation_id: str) -> None:
+        terminated.append(conversation_id)
+
+    monkeypatch.setattr(services, "open_client", close_it_behind_our_back)
+    monkeypatch.setattr(get_agent_runtime_provider(), "terminate", record_terminate)
+    epoch_before = conversation.state_epoch
+
+    response = await aapi_client.post(
+        f"{CONVERSATIONS_URL}{conversation.number}/runs/",
+        data={"content": "carry on"},
+        content_type="application/json",
+    )
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    # The point is not that this request failed but that the Runtime it brought up was taken
+    # back down, together with its authority to write.
+    assert terminated == [str(conversation.id)]
     await conversation.arefresh_from_db()
     assert conversation.state_epoch == epoch_before + 1
 

@@ -55,7 +55,8 @@ async def create_project(*, project_id: str, name: str, owner: str, tenant_id: s
 async def _reject_taken(*, project_id: str, name: str, tenant_id: str) -> None:
     """ID 或名称已被占用就直接拒掉，并说清楚是哪一个。
 
-    用 ``default_objects`` 而不是 ``objects``：软删除的 Project 仍然占着主键和 (tenant_id, name)
+    用 ``default_objects`` 而不是 ``objects``：软删除的 Project 仍然占着主键和
+    ``(tenant_id, name)`` 唯一约束，查占用时必须把它们也算进去。
 
     :raises ProjectIdTakenError: ID 已被占用。ID 是全局唯一的，不分租户。
     :raises ProjectNameTakenError: 同租户下已有同名项目。

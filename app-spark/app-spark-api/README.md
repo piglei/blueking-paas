@@ -126,14 +126,18 @@ Runtime 的 `/health` 的 `pushed_*` 游标看。
 `GET .../conversations/<n>/` 的 `running` 与 `replication_pending`；会话列表刻意不报这些，否则
 一页 20 条就是 20 次 `/health` 请求。
 
-结束会话同时也是 Runtime 唯一的对外回收入口，走的就是 `terminate_runtime()`：停掉进程，并把
-上面那套 `state_epoch` 吊销机制真正用上，之前签发的回写 token 全部作废。于是它占着的 Project
-workspace 被交还，同一个 Project 的下一个会话才能开起来（一个 workspace 同时只容得下一个
-Runtime）。如果此刻正有一轮对话在跑，它会被打断，客户端那条 SSE 流上会收到一个 AG-UI
-`RUN_ERROR` 事件。
+结束会话同时也是 Runtime 唯一的对外回收入口，走的就是 `terminate_runtime()`：先把上面那套
+`state_epoch` 吊销机制真正用上，让之前签发的回写 token 全部作废，**然后**才去停进程。这个顺序
+是有讲究的：停进程是尽力而为（进程可能已经没了、可能不理信号、也可能本服务早就跟丢了），吊销
+token 才是「不会再有东西以这个会话的名义写进来」的保证——所以停不掉只记日志，而不是把吊销挡在
+后面。停掉之后它占着的 Project workspace 被交还，同一个 Project 的下一个会话才能开起来（一个
+workspace 同时只容得下一个 Runtime）。如果此刻正有一轮对话在跑，它会被打断，客户端那条 SSE 流
+上会收到一个 AG-UI `RUN_ERROR` 事件。
 
-会话结束后历史仍然可读，只是不能再发起新的一轮对话——`start_run` 里有一道闸门拦着，否则「结束」
-只是杀掉了一个进程，下一轮对话会照常把 Runtime 重新拉起来。
+会话结束后历史仍然可读，只是不能再发起新的一轮对话——`start_run` 里有闸门拦着，否则「结束」
+只是杀掉了一个进程，下一轮对话会照常把 Runtime 重新拉起来。闸门有两道，因为拉起 Runtime 要花
+好几秒，够另一个请求在这中间把会话结束掉：进来时看一次，Runtime 拉起来之后再回库确认一次，
+确认没过就把刚拉起来的 Runtime 收掉并返回 409（见 `_reject_if_closed_meanwhile()`）。
 
 ## 部署相关
 
